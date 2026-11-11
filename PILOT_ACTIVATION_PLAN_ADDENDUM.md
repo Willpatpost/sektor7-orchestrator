@@ -11,30 +11,22 @@
 
 **The mechanism (chosen because nothing else exists here):** verified this turn — **no systemd** (PID 1 is the container entrypoint `coder`, not systemd; `systemctl` cannot operate) and **no atd** (`at` not installed). The qwen scheduled-task mechanism delivers prompts to sessions — it depends on the daemon and an Agent D turn, which is exactly the reminder-based enforcement the review rejected. The only independent mechanism available is a **detached deadline fuse**: a double-fork-orphan process whose sole authority is to terminate the supervisor at the deadline and leave evidence. It observes nothing but the clock — it is a fuse, not a watchdog. It cannot POST to the daemon, restart anything, touch the cron, or write the accepted sources.
 
-**The artifact:** `~/.qwen/sektor7-coordination/pilot/expiry-fuse.sh` (77 lines; full text on disk; `usage: expiry-fuse.sh DEADLINE_EPOCH [SUPERVISOR_PID]`).
+**The artifact:** `~/.qwen/sektor7-coordination/pilot/expiry-fuse.sh` (full text on the review branch; `usage: expiry-fuse.sh DEADLINE_EPOCH [SUPERVISOR_PID [SUPERVISOR_STARTTIME]]` — the paired launcher passes all three).
 
-**Exact activation-time procedure (part of the owner's activation GO, paired with the supervisor launch):**
+**Exact activation-time procedure (part of the owner's activation GO — the fail-closed paired launcher `pilot/paired-launch.sh`, O1-corrected and 37/37 test-verified):**
 
 ```bash
-# Day 0, after preflight — launch the supervisor (the proven double-fork orphan):
-bash -c "setsid nohup bash ~/.qwen/sektor7-coordination/orchestrator/supervisor.sh run \
-  >> ~/.qwen/sektor7-coordination/pilot/supervisor-launch.log 2>&1 < /dev/null & disown"
-sleep 1
-# record the PID — assert exactly ONE match before proceeding:
-SUP_PID="$(pgrep -f 'orchestrator/supervisor.sh run')"
-[ "$(printf '%s\n' "$SUP_PID" | wc -l)" = 1 ]   # else: abort, investigate
-# launch the fuse — deadline = activation + exactly 7 days (604800 s), visible in ps:
-DEADLINE=$(( $(date -u +%s) + 604800 ))
-bash -c "setsid nohup bash ~/.qwen/sektor7-coordination/pilot/expiry-fuse.sh \
-  $DEADLINE $SUP_PID >> ~/.qwen/sektor7-coordination/pilot/fuse-launch.log 2>&1 < /dev/null & disown"
-# both PIDs + the deadline recorded in STATUS.md immediately
+# Day 0, after preflight — ONE command launches and verifies the pair:
+bash ~/.qwen/sektor7-coordination/pilot/paired-launch.sh 604800
 ```
 
+The launcher (source on the review branch; the full behavior proven in `pilot/paired-launch-test.sh`): launches the supervisor and the fuse as ONE unit via the proven double-fork orphan form; discovers each PID by pattern and then **strictly verifies identity — the exact argv from `/proc/<pid>/cmdline` (never a loose substring; the transient double-fork intermediate fails the check) plus the process start time from `/proc/<pid>/stat`**, captured and recorded in `pilot/launch-record.json`; asserts exactly one validated match (a pre-existing instance = an abort, never a guess); verifies the supervisor's loop-start and coordinator-configuration lines in the state log (the intended deployment); verifies the fuse is alive, carries the intended deadline in its argv, and recorded `fuse armed: deadline_epoch=<N>` in its log. **On ANY failure at any step: the stop-flag is set (state-dir scoped — it stops every supervisor reading this state dir, including one that cannot be individually identified), the identity-verified kill fallback applies only to OUR recorded PID, an unpaired fuse is torn down by its verified identity, the stale stop-flag is removed only when nothing remains running, ALL state and logs are preserved (nothing deleted — forensic evidence intact), the failure is recorded with its reason, and the launcher exits 1.** The deliberate fuse-launch-failure demonstration (test L2): a broken fuse path → the supervisor stopped cleanly, the failure record written, state preserved — 9/9 assertions.
+
 **Termination escalation (in the fuse, all steps logged with UTC timestamps):**
-1. **Primary — the stop-flag:** `supervisor.sh stop` (the accepted v11 interface, unchanged); a running supervisor exits cleanly within one cycle (≤ ~20 s + cycle). The fuse waits up to 60 s.
-2. **Fallback — `kill -TERM`** by the recorded PID, only after `/proc/<PID>/cmdline` is verified to contain `supervisor.sh` (**PID-reuse protection over the 7-day window** — an unverified PID is NEVER signaled); then up to 30 s more.
-3. **Last resort — `kill -KILL`**, same cmdline verification.
-4. If the PID does not verify: **no signal** — the stop-flag stands, the ambiguity is recorded, and a human decision is required (never a blind kill).
+1. **Primary — the stop-flag:** `supervisor.sh stop` (the accepted v11 interface, unchanged); a running supervisor exits cleanly within one cycle (≤ ~20 s + cycle). The fuse waits up to `SEKTOR7_FUSE_TERM_WAIT` (default 60 s).
+2. **Fallback — `kill -TERM`** by the recorded PID, only after the process identity verifies: **the exact argv** (`bash <script> run` from `/proc/<PID>/cmdline`) **AND the recorded process start time** from `/proc/<PID>/stat` when provided by the launcher (**PID-reuse protection over the 7-day window** — an unverified PID is NEVER signaled); then up to `SEKTOR7_FUSE_KILL_WAIT` (default 30 s) more. **Test-verified (L3):** a long-interval supervisor that cannot consume the flag in time is stopped by the identity-verified TERM — `method: stop-flag+TERM`, `exitVerified: true`, the stale flag removed after the verified kill.
+3. **Last resort — `kill -KILL`**, same verification. *Documented but untested* (would require a TERM-surviving process; the escalation logic above it is tested).
+4. If the identity does not verify: **no signal** — the stop-flag stands, the ambiguity is recorded, and a human decision is required (never a blind kill). *Documented; the refusal path is exercised implicitly by the identity-check unit logic.*
 
 **Timing bound:** the fuse polls the clock every `SEKTOR7_FUSE_POLL` (default 300 s) — the stop executes within 5 minutes after the exact Day-7 deadline. If the supervisor is already dead at the deadline, the fuse removes any stale stop-flag (so it cannot sabotage a future launch) and records `already-stopped`.
 
@@ -82,10 +74,12 @@ bash -c "setsid nohup bash ~/.qwen/sektor7-coordination/pilot/expiry-fuse.sh \
 
 **Acknowledged (source-verified this turn, lines cited):** `--dry-run` suppresses **only the delivery POSTs** — `deliver_pending` is the single DRY-branching function (`DRYRUN would attempt delivery`, no `submitting` transition, no POST). The checkpoint writes (`checkpoint_write` in both the fresh-baseline and advance paths), event persistence (`process_log_line` never consults `dryrun` — every matched completion becomes a `pending` event), permission-episode transactions, clearances, and `recover_and_escalate` patches **all proceed in dry-run**.
 
-**Expected state transition on the CURRENT fresh production state (the only state we will dry-run):**
-1. `state/log-checkpoint.json` **CREATED** — the fresh-baseline path writes `{cursor: <daemon-log EOF>, inode, size, prefixDigest}` and logs `log baseline set (no replay; the initial continuity snapshot recorded)`; the function returns before any region scan — **no events from historical content**.
-2. `state/events.json` / `permState` **UNCHANGED** — unless a watched seat is in permWait at that moment (then one episode event + transition persists — dry-run does NOT suppress it; the pre-dry-run live check `bash orchestrator.sh status <sid>` for all three seats confirms the expectation beforehand).
-3. **Zero POSTs** (nothing pending + the DRY branch).
+**Expected state transition on the CURRENT fresh production state (source-verified AND test-verified — `pilot/dryrun-restore-test.sh` 14/14):**
+1. `state/log-checkpoint.json` **NEW** — the fresh-baseline path writes `{cursor: <daemon-log EOF>, inode, size, prefixDigest}` and logs `log baseline set (no replay; the initial continuity snapshot recorded)`; the function returns before any region scan — **no events from historical content**.
+2. `state/supervisor.log` **NEW** — the startup/baseline/single-cycle lines.
+3. `state/supervisor-run.lock` **NEW** — the run-lock file (empty; the flock releases at exit, the file remains).
+4. `state/events.json` **MUTATED — the permState clearance cache**: `check_permission_waits` runs its clearance transaction for every watched session with `perm=false` on every cycle **regardless of dryrun** (the flag is not consulted on that path), so `.permState` gains `{waiting:false, episodes:0}` per watched session. This is the accepted P1 self-healing cache — benign and characterized exactly: **`.events` stays empty (no events created), seats/approvals byte-identical, no `wake.log`, no `submit.lock`.** (If a watched seat is in permWait at that moment, one episode event + transition would also persist — pre-checked live beforehand.)
+5. **Zero POSTs** (nothing pending + the DRY branch).
 
 **Protected snapshot BEFORE the first dry-run (reordered per the review — now preflight step 6, before any supervisor execution):**
 ```bash
@@ -97,12 +91,26 @@ stat -c '%s %i' ~/.qwen-serve.log         # the pre-dry-run log size + inode, re
 ```
 Stored outside the runtime path; nothing in `orchestrator/` is modified by the snapshot itself.
 
-**Post-dry-run diff check (the expected delta or STOP):**
+**Post-dry-run verification (the classified comparison — `pilot/dryrun-restore-test.sh` automates exactly this):**
+- **Expected metadata delta — all four items above and NOTHING else.**
+- **Unexpected (any one → the failure path):** any `.events` entry, any byte change to seats.json/approvals.json/relay-ledger.json, a `wake.log` or `submit.lock`, or any new file outside the expected set.
 ```bash
-tar xzf pilot-baseline-state-<ts>.tar.gz -C /tmp/diff-check --strip-components=1
-diff -r /tmp/diff-check orchestrator/state   # expected: ONLY the new log-checkpoint.json
+NEWFILES="$(comm -13 <(tar tzf pilot-baseline-state-<ts>.tar.gz | sed 's|^\./||' | grep -v '^$' | sort) <(ls -A orchestrator/state | sort))"
+# expected: exactly log-checkpoint.json, supervisor.log, supervisor-run.lock
+jq '.permState | length == 3 and ([to_entries[] | .value.waiting == false and .value.episodes == 0] | all)' orchestrator/state/events.json
+jq '.events | length' orchestrator/state/events.json   # must be 0
 ```
-Any delta beyond the documented expectation → **STOP, restore the snapshot (`tar xzf … -C orchestrator` over state/), report — no activation.**
+
+**The restoration procedure (a failed preflight — tested; forensic evidence preserved, nothing deleted):**
+```bash
+# (1) move the post-failure state aside — the forensic record (logs, checkpoint, store)
+mv orchestrator/state ~/.qwen/sektor7-coordination/state-failed-$(date -u +%Y%m%dT%H%M%SZ)
+# (2) recreate the exact pre-dry-run state from the snapshot
+mkdir -p orchestrator/state && tar xzf pilot-baseline-state-<ts>.tar.gz -C orchestrator/state
+# (3) verify: the restored inventory + contents are EXACTLY the snapshot (no unrecognized new files)
+tar czf /tmp/restored.tar.gz -C orchestrator state . && cmp /tmp/restored.tar.gz pilot-baseline-state-<ts>.tar.gz
+```
+Test-verified (R2): the restored state is byte-identical to the snapshot with no leftover files, and the forensic copy retains the checkpoint, logs, and store for explaining the failure.
 
 **First production baseline reconciled with the last successful cron observation:** the fresh baseline's cursor is the daemon-log EOF at dry-run time; events in the interval **(last cron observation → baseline)** are never observed by the supervisor. The one-time reconciliation at activation:
 ```bash

@@ -1,0 +1,24 @@
+SEKTOR7 dry-run state verification — final run 2026-11-11T23:20:56Z
+test: dryrun-restore-test.sh — the REAL v11 supervisor.sh run --once --dry-run, mock-wired, a test state dir; production untouched
+
+--- result: 14 pass / 0 fail ---
+
+--- the post-dry-run events.json (the permState clearance cache — the O2 discovery) ---
+{
+  "events": {},
+  "permState": {
+    "11111111-2222-3333-4444-555555555555": {
+      "waiting": false,
+      "episodes": 0
+    },
+    "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee": {
+      "waiting": false,
+      "episodes": 0
+    },
+    "32323232-3232-3232-3232-323232323232": {
+      "waiting": false,
+      "episodes": 0
+    }
+  }
+}
+--- the dry-run stdout ---

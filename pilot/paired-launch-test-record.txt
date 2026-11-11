@@ -1,0 +1,77 @@
+SEKTOR7 paired-launch verification — final run 2026-11-11T23:20:56Z
+test: paired-launch-test.sh — the REAL v11 supervisor + the real pilot scripts (paired-launch/expiry-fuse/pairing-check/token-scan), mock-wired, per-case state/pilot dirs; production untouched
+
+--- result: 37 pass / 0 fail ---
+L1 the paired-launch success lifecycle · L2 the deliberate fuse-launch failure -> fail-closed · L3 the TERM escalation · L4 the unexpected fuse death -> detection · L5 the quiet token scan
+
+--- L1 launch record ---
+{
+  "launchedAt": "2026-11-11T23:15:56Z",
+  "durationSeconds": 8,
+  "deadlineEpoch": 1794438964,
+  "supervisorPid": 3318339,
+  "supervisorStarttime": "137014198",
+  "fusePid": 3318387,
+  "fuseStarttime": "137014202",
+  "result": "launched",
+  "reason": ""
+}
+--- L1 expiry evidence ---
+{
+  "deadline": 1794438964,
+  "executedAt": "2026-11-11T23:16:18Z",
+  "method": "stop-flag",
+  "supervisorRunningAtDeadline": true,
+  "exitVerified": true
+}
+--- L1 paired-launch log ---
+2026-11-11T23:15:56Z paired launch beginning: duration=8s state_dir=/tmp/paired-test.hbA0bq/c1/state fuse=/home/coder/.qwen/sektor7-coordination/pilot/expiry-fuse.sh
+2026-11-11T23:15:56Z deadline_epoch=1794438964 (2026-11-11T23:16:04Z)
+2026-11-11T23:15:56Z supervisor identified: pid=3318339 starttime=137014198 (argv verified)
+2026-11-11T23:15:56Z supervisor deployment verified: mode=live; the coordinator configuration validated
+2026-11-11T23:15:56Z fuse identified: pid=3318387 starttime=137014202 (argv verified: deadline 1794438964, supervisor 3318339)
+2026-11-11T23:15:56Z fuse arming verified: deadline 1794438964 recorded in the fuse log and carried in its argv
+2026-11-11T23:15:56Z PAIRED LAUNCH VERIFIED: supervisor pid=3318339 fuse pid=3318387 deadline=1794438964 — record: /tmp/paired-test.hbA0bq/c1/pilot/launch-record.json
+
+--- L2 failure record (the deliberate fuse-launch failure) ---
+{
+  "launchedAt": "2026-11-11T23:16:41Z",
+  "durationSeconds": 300,
+  "deadlineEpoch": 1794439280,
+  "supervisorPid": 3318721,
+  "supervisorStarttime": "137016525",
+  "fusePid": 0,
+  "fuseStarttime": "unknown",
+  "result": "failed",
+  "reason": "fuse discovery failed (not found in 10 s or ambiguous — the fuse launch may have failed)"
+}
+--- L2 paired-launch log ---
+2026-11-11T23:16:20Z paired launch beginning: duration=300s state_dir=/tmp/paired-test.hbA0bq/c2/state fuse=/nonexistent/fuse.sh
+2026-11-11T23:16:20Z deadline_epoch=1794439280 (2026-11-11T23:21:20Z)
+2026-11-11T23:16:20Z supervisor identified: pid=3318721 starttime=137016525 (argv verified)
+2026-11-11T23:16:20Z supervisor deployment verified: mode=live; the coordinator configuration validated
+2026-11-11T23:16:30Z LAUNCH FAILURE: fuse discovery failed (not found in 10 s or ambiguous — the fuse launch may have failed) — executing fail-closed
+stop-flag set (a running supervisor exits within one cycle)
+2026-11-11T23:16:30Z stop-flag set — waiting up to 60 s for supervisor exits
+2026-11-11T23:16:41Z fail-closed complete — state preserved; record: /tmp/paired-test.hbA0bq/c2/pilot/launch-record.json
+
+--- L3 expiry evidence (TERM escalation) ---
+{
+  "deadline": 1794439007,
+  "executedAt": "2026-11-11T23:16:52Z",
+  "method": "stop-flag+TERM",
+  "supervisorRunningAtDeadline": true,
+  "exitVerified": true
+}
+--- L3 fuse log tail ---
+stop-flag set (a running supervisor exits within one cycle)
+2026-11-11T23:16:47Z stop-flag set — waiting up to 5 s for the clean exit (one cycle at the 20 s interval)
+2026-11-11T23:16:52Z TERM sent to 3319127 (argv + start-time verified)
+2026-11-11T23:16:52Z stale stop-flag removed after the verified forced stop
+2026-11-11T23:16:52Z supervisor terminated (method=stop-flag+TERM)
+2026-11-11T23:16:52Z evidence written: /tmp/paired-test.hbA0bq/c3/pilot/expiry-executed.json (exitVerified=true)
+
+--- L4 pairing check (broken) ---
+BROKEN: the supervisor is running WITHOUT its expiry fuse — execute the rollback runbook (stop the supervisor, preserve state, report)
+--- L4 pairing check (after cleanup) ---
+NEITHER: no supervisor and no fuse (the normal post-expiry or pre-activation state)
