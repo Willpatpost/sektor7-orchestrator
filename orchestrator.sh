@@ -172,11 +172,12 @@ validate_meta() { # validate_meta JSON -> 0 ok; nonzero refuse
   printf '%s' "$1" | jq -e '
       (type == "object")
       and ((keys | sort) == ["kind", "outcome", "promptId", "seat", "sessionId"])
-      and (.kind == "worker-turn" or .kind == "permission-wait")
-      and (.outcome == "completed" or .outcome == "failed" or .outcome == "waiting")
-      and ((.seat | type) == "string") and ((.seat | length) > 0) and ((.seat | length) <= 8)
       and ((.sessionId | type) == "string") and (.sessionId | test("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"))
       and ((.promptId | type) == "string") and (.promptId | test("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"))
+      and ((.seat | type) == "string") and ((.seat | length) > 0) and ((.seat | length) <= 8)
+      # C4: the kind/outcome pairing — contradictory combinations refuse
+      and ((.kind == "worker-turn" and (.outcome == "completed" or .outcome == "failed"))
+           or (.kind == "permission-wait" and .outcome == "waiting"))
     ' >/dev/null 2>&1
 }
 
@@ -193,15 +194,25 @@ require_coordinator_target() { # require_coordinator_target SID — the destinat
 }
 
 require_recorded_event() { # require_recorded_event META-JSON — the metadata must match a recorded event
-  local meta="$1" evfile="$STATE_DIR/events.json"
+  local meta="$1" evfile="$STATE_DIR/events.json" src_sid src_name src_seat
   [ -s "$evfile" ] || die "notification refused: the event store is missing or empty — the metadata cannot be bound to a recorded event (E3)"
+  # C4: the source/session binding — the metadata's seat must equal the CONFIGURED
+  # seatOf identity of the metadata's source session (the roster name's label,
+  # falling back to the name when unconfigured).
+  src_sid="$(printf '%s' "$meta" | jq -r '.sessionId')"
+  src_name="$(name_of "$src_sid")"
+  [ -n "$src_name" ] || die "notification refused: the metadata's source session does not resolve in the roster (C4 source binding)"
+  src_seat="$(jq -r --arg n "$src_name" '.seatOf[$n] // $n' "$STATE_DIR/seats.json" 2>/dev/null || echo "$src_name")"
+  [ "$(printf '%s' "$meta" | jq -r '.seat')" = "$src_seat" ] \
+    || die "notification refused: the metadata's seat does not match the configured seat identity of its source session (meta seat vs seatOf[$src_name]) — contradictory source binding refused (C4)"
   jq -e --argjson m "$meta" '
       (.events | type) == "object"
       and ([ .events[] | select(
-            (.seat == $m.seat) and (.sessionId == $m.sessionId) and (.promptId == $m.promptId) and (.outcome == $m.outcome)
+            (.kind == $m.kind)
+            and (.seat == $m.seat) and (.sessionId == $m.sessionId) and (.promptId == $m.promptId) and (.outcome == $m.outcome)
           ) ] | length) > 0
     ' "$evfile" >/dev/null 2>&1 \
-    || die "notification refused: no recorded event matches the metadata (seat/session/promptId/outcome) — unbound notifications are refused (E3)"
+    || die "notification refused: no recorded event matches the metadata (kind/seat/sessionId/promptId/outcome) — unbound notifications are refused (E3/C4)"
 }
 
 build_notification() { # build_notification META-JSON -> the fixed text (stdout)

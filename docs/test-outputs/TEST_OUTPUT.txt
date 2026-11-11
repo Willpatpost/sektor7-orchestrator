@@ -162,5 +162,53 @@ PASS E3c-seat-mismatch
 PASS E3c-zero-posts
 PASS E3d-bound-notify-delivered
 PASS E3d-one-post
+PASS C3-baseline
+PASS C3-filler-region-cycle
+PASS C3-no-fake-hold
+PASS C3-cursor-advanced
+PASS C3b-malformed-line-cycle
+PASS C3b-no-event
+PASS C3b-no-fake-hold
+PASS C3b-cursor-advanced
+PASS C1s-baseline
+PASS C1s-gen1-cycle
+PASS C1s-gen1-event
+PASS C1s-shorter-replacement-cycle
+PASS C1s-gap-recorded
+PASS C1s-gap-unresolved
+PASS C1s-unobserved-completion-recovered
+PASS C1s-prior-event-preserved
+PASS C1e-baseline-cycle
+PASS C1e-genuinely-equal-size
+PASS C1e-equal-replacement-cycle
+PASS C1e-gap-recorded
+PASS C1e-unobserved-completion-recovered
+PASS C1l-baseline
+PASS C1l-gen1-cycle
+PASS C1l-genuinely-longer
+PASS C1l-longer-replacement-cycle
+PASS C1l-gap-recorded
+PASS C1l-unobserved-completions-recovered
+PASS C1a-append-control-cycle
+PASS C1a-no-spurious-gap
+PASS C1a-append-event-recorded
+PASS C2-failing-write-cycle
+jq: parse error: Invalid numeric literal at line 1, column 8
+PASS C2-episode-not-recorded
+PASS C2-state-not-advanced
+PASS C2-repair-cycle
+PASS C2-exactly-one-event
+PASS C2-clearance
+PASS C2-episode2
+PASS C2-distinct-episodes-preserved
+PASS C4a-kind-mismatch-refused
+PASS C4a-zero-posts
+PASS C4b-contradictory-kind-outcome
+PASS C4b-zero-posts
+PASS C4c-source-seat-mismatch
+PASS C4c-zero-posts
+PASS C4d-valid-config-end-to-end
+PASS C4d-one-post
+PASS C4e-no-coordinator-refuses-run
 
-RESULTS: pass=164 fail=0 (round-4 battery v5; live wake-up evidence documented separately)
+RESULTS: pass=211 fail=0 (round-5 battery v6; live wake-up evidence documented separately)
