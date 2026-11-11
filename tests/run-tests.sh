@@ -923,6 +923,66 @@ check  "G2b-legacy-cleaned" "[ ! -f \"$WORK/state45/log-offset\" ]"
 check  "G2b-completion-recovered-once" "jq -e '[.events[] | select(.promptId == \"ccddccdd-6666-6666-6666-666666666666\")] | length == 1' \"$WORK/state45/events.json\" >/dev/null"
 check  "G2b-no-spurious-gap" "jq -e '[.events[] | select(.kind == \"log-gap\")] | length == 0' \"$WORK/state45/events.json\" >/dev/null"
 
+
+# --- round-8 regressions (the growing-replacement identity stability) -----------------
+# The precise interrupted-recovery sequence from the directive: the old checkpoint,
+# the replacement + gap commit, the crash (the old checkpoint restored), then a
+# NORMAL APPEND growing the replacement (newSize changes, newInode preserved) —
+# the restart must reuse the SAME identity: one gap, one companion, no duplicate
+# POST, and the newly appended completion discovered.
+export SEKTOR7_STATE_DIR="$WORK/state46"; mkdir -p "$WORK/state46"
+cp "$WORK/state/seats.json" "$WORK/state46/seats.json"
+printf 'v11 gen1: 2026-11-11T20:20:00.000Z [INFO] [DAEMON] sessionId=%s promptId=1a2b1a2b-7777-7777-7777-777777777777 prompt turn completed\n' "$SID" > "$WORK/daemon-mock.log"
+scenario "{\"sessions\":{\"$SID\":{\"state\":\"idle\",\"permWait\":false},\"$SID_D\":{\"state\":\"idle\"}},\"postPrompt\":{\"ok\":true}}"
+expect_ok "V11-baseline" bash "$SUP" run --once --dry-run
+PREV_CP="$(cat "$WORK/state46/log-checkpoint.json")"
+printf 'v11 gen2: 2026-11-11T20:21:00.000Z [INFO] [DAEMON] sessionId=%s promptId=2b3c2b3c-8888-8888-8888-888888888888 prompt turn completed\n' "$SID" > "$WORK/daemon-mock.log"
+reset_posts
+expect_ok "V11-gap-cycle" bash "$SUP" run --once
+check  "V11-one-gap" "jq -e '[.events[] | select(.kind == \"log-gap\" and .state == \"unresolved\")] | length == 1' \"$WORK/state46/events.json\" >/dev/null"
+check  "V11-posts" "[ \"\$(count_posts)\" = 2 ]"
+# the crash: the checkpoint update lost
+printf '%s' "$PREV_CP" > "$WORK/state46/log-checkpoint.json"
+# the replacement GROWS (a normal daemon append; the inode preserved by >>)
+printf 'v11 gen2 grown: 2026-11-11T20:22:00.000Z [INFO] [DAEMON] sessionId=%s promptId=3c4d3c4d-9999-9999-9999-999999999999 prompt turn completed\n' "$SID" >> "$WORK/daemon-mock.log"
+expect_ok "V11-crash-recovery-with-grown-replacement" bash "$SUP" run --once
+check  "V11-still-one-gap-after-growth" "jq -e '[.events[] | select(.kind == \"log-gap\" and .state == \"unresolved\")] | length == 1' \"$WORK/state46/events.json\" >/dev/null"
+check  "V11-still-one-companion" "jq -e '[.events[] | select(.kind == \"log-gap\" and .state == \"delivered\")] | length == 1' \"$WORK/state46/events.json\" >/dev/null"
+check  "V11-no-duplicate-post-for-the-gap" "[ \"\$(count_posts)\" = 3 ]"
+check  "V11-grown-completion-discovered" "jq -e '[.events[] | select(.promptId == \"3c4d3c4d-9999-9999-9999-999999999999\")] | length == 1' \"$WORK/state46/events.json\" >/dev/null"
+# repeated retries with additional appends — still one incident
+printf '%s' "$PREV_CP" > "$WORK/state46/log-checkpoint.json"
+printf 'v11 gen2 grown again: 2026-11-11T20:23:00.000Z [INFO] [DAEMON] sessionId=%s promptId=4d5e4d5e-aaaa-aaaa-aaaa-aaaaaaaaaaaa prompt turn completed\n' "$SID" >> "$WORK/daemon-mock.log"
+expect_ok "V11-second-retry-cycle" bash "$SUP" run --once
+check  "V11-one-gap-across-retries" "jq -e '[.events[] | select(.kind == \"log-gap\" and .state == \"unresolved\")] | length == 1' \"$WORK/state46/events.json\" >/dev/null"
+check  "V11-no-extra-post-for-the-gap-across-retries" "[ \"\$(count_posts)\" = 4 ]"
+check  "V11-second-append-discovered" "jq -e '[.events[] | select(.promptId == \"4d5e4d5e-aaaa-aaaa-aaaa-aaaaaaaaaaaa\")] | length == 1' \"$WORK/state46/events.json\" >/dev/null"
+# a separate transition AFTER the checkpoint advances — a distinct identity
+printf 'v11 gen3: 2026-11-11T20:24:00.000Z [INFO] [DAEMON] sessionId=%s promptId=5e6f5e6f-bbbb-bbbb-bbbb-bbbbbbbbbbbb prompt turn completed\n' "$SID" > "$WORK/daemon-mock.log"
+expect_ok "V11-distinct-after-advance" bash "$SUP" run --once
+check  "V11-two-gaps-after-advancement" "jq -e '[.events[] | select(.kind == \"log-gap\" and .state == \"unresolved\")] | length == 2' \"$WORK/state46/events.json\" >/dev/null"
+
+# V11b: the legacy-migration retry with a GROWING log — the legacy identity is
+# stable (the legacy offset/continuity never change), so the retry reuses the gap
+export SEKTOR7_STATE_DIR="$WORK/state47"; mkdir -p "$WORK/state47"
+cp "$WORK/state/seats.json" "$WORK/state47/seats.json"
+printf 'v11b content: 2026-11-11T20:30:00.000Z [INFO] [DAEMON] sessionId=%s promptId=6f706f70-cccc-cccc-cccc-cccccccccccc prompt turn completed\n' "$SID" > "$WORK/daemon-mock.log"
+echo 25 > "$WORK/state47/log-offset"
+printf '{"events":{},"permState":{}}' > "$WORK/state47/events.json"
+# the first migration succeeds (the gap + completions + the checkpoint commit)
+expect_ok "V11b-first-migration-cycle" bash "$SUP" run --once --dry-run
+# simulate the interrupted recovery: the checkpoint is lost, the legacy state returns
+# (the gap + its companion are already committed — exactly the crash window)
+rm -f "$WORK/state47/log-checkpoint.json"
+echo 25 > "$WORK/state47/log-offset"
+# the log grows before the retry
+printf 'v11b grown: 2026-11-11T20:31:00.000Z [INFO] [DAEMON] sessionId=%s promptId=70817081-dddd-dddd-dddd-dddddddddddd prompt turn completed\n' "$SID" >> "$WORK/daemon-mock.log"
+expect_ok "V11b-retry-with-grown-log" bash "$SUP" run --once --dry-run
+check  "V11b-one-gap" "jq -e '[.events[] | select(.kind == \"log-gap\" and .state == \"unresolved\")] | length == 1' \"$WORK/state47/events.json\" >/dev/null"
+check  "V11b-first-completion-recovered" "jq -e '[.events[] | select(.promptId == \"6f706f70-cccc-cccc-cccc-cccccccccccc\")] | length == 1' \"$WORK/state47/events.json\" >/dev/null"
+check  "V11b-grown-completion-recovered" "jq -e '[.events[] | select(.promptId == \"70817081-dddd-dddd-dddd-dddddddddddd\")] | length == 1' \"$WORK/state47/events.json\" >/dev/null"
+check  "V11b-legacy-removed" "[ ! -f \"$WORK/state47/log-offset\" ]"
+
 echo
-echo "RESULTS: pass=$PASS fail=$FAIL (round-7 battery v8; live wake-up evidence documented separately)"
+echo "RESULTS: pass=$PASS fail=$FAIL (round-8 battery v9; live wake-up evidence documented separately)"
 [ "$FAIL" -eq 0 ]

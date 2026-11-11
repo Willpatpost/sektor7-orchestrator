@@ -160,16 +160,21 @@ checkpoint_write() { # checkpoint_write CURSOR INODE SIZE — ONE atomic write (
 }
 checkpoint_read() { jq -r "$1" "$CHECKPOINT" 2>/dev/null || echo ""; }
 
-# P3 + G1: persist the gap record AND its companion notification event in ONE
-# atomic store write. The gap identity is DETERMINISTIC — derived from the
-# transition itself (the full old-checkpoint identity + the new file's inode and
-# size), never from the time — so reprocessing the same transition after a crash
-# (the gap committed, the checkpoint update lost) reuses the existing records:
-# no duplicate gap, no duplicate companion, no reset of a delivered notification.
+# P3 + G1 (v11): persist the gap record AND its companion notification event in
+# ONE atomic store write. The gap identity is DETERMINISTIC and anchored to the
+# STABLE OLD CHECKPOINT ALONE — never to mutable properties of the replacement
+# log (its size or inode change under ordinary appends). Repeated detection from
+# the same unadvanced checkpoint — including after the replacement grows, across
+# any number of retries — recomputes the SAME identity and reuses the existing
+# records: no duplicate gap, no duplicate companion, no state reset. A genuinely
+# new transition after the checkpoint advances produces a different old-checkpoint
+# identity and therefore a distinct record. Multiple unobserved replacements while
+# the checkpoint cannot advance are conservatively ONE unresolved coverage
+# incident (the correct semantics: never claim complete observation of a stall).
 persist_log_gap() { # persist_log_gap OLD_IDENTITY_COMPACT NEW_INODE NEW_SIZE
   local old_id="$1" ni="$2" ns="$3"
   local tid key from to oi coord_sid tmp
-  tid="$(printf '%s|%s|%s' "$old_id" "$ni" "$ns" | sha256sum | awk '{print $1}' | cut -c1-16)"
+  tid="$(printf '%s' "$old_id" | sha256sum | awk '{print $1}' | cut -c1-16)"
   key="log-gap:$tid"
   if event_exists "$key"; then
     log "LOG-GAP already recorded for this transition (deterministic identity $tid) — no duplicate"

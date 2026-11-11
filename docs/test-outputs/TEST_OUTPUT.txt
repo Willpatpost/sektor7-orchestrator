@@ -270,5 +270,26 @@ PASS G2b-crash-after-checkpoint-cycle
 PASS G2b-legacy-cleaned
 PASS G2b-completion-recovered-once
 PASS G2b-no-spurious-gap
+PASS V11-baseline
+PASS V11-gap-cycle
+PASS V11-one-gap
+PASS V11-posts
+PASS V11-crash-recovery-with-grown-replacement
+PASS V11-still-one-gap-after-growth
+PASS V11-still-one-companion
+PASS V11-no-duplicate-post-for-the-gap
+PASS V11-grown-completion-discovered
+PASS V11-second-retry-cycle
+PASS V11-one-gap-across-retries
+PASS V11-no-extra-post-for-the-gap-across-retries
+PASS V11-second-append-discovered
+PASS V11-distinct-after-advance
+PASS V11-two-gaps-after-advancement
+PASS V11b-first-migration-cycle
+PASS V11b-retry-with-grown-log
+PASS V11b-one-gap
+PASS V11b-first-completion-recovered
+PASS V11b-grown-completion-recovered
+PASS V11b-legacy-removed
 
-RESULTS: pass=271 fail=0 (round-7 battery v8; live wake-up evidence documented separately)
+RESULTS: pass=292 fail=0 (round-8 battery v9; live wake-up evidence documented separately)
