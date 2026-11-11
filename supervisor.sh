@@ -47,9 +47,9 @@ log() { echo "$(date -u +%FT%TZ) $*" >> "$LOG"; }
 # fault-tolerant startup init (an unwritable store must not kill the supervisor —
 # the store operations themselves fail loudly and hold the cursor per E1)
 EVENTS="$STATE_DIR/events.json"
-[ -f "$EVENTS" ] || { printf '{"events":{}}' > "$EVENTS" 2>/dev/null || log "event store unwritable at startup (fault-tolerant; store operations will fail loudly): $EVENTS"; }
-PERMSTATE="$STATE_DIR/perm-state.json"
-[ -f "$PERMSTATE" ] || { printf '{"sessions":{}}' > "$PERMSTATE" 2>/dev/null || log "perm-state unwritable at startup (fault-tolerant): $PERMSTATE"; }
+[ -f "$EVENTS" ] || { printf '{"events":{},"permState":{}}' > "$EVENTS" 2>/dev/null || log "event store unwritable at startup (fault-tolerant; store operations will fail loudly): $EVENTS"; }
+# P2: the cursor, inode, size, and prefix digest persist as ONE atomic checkpoint
+CHECKPOINT="$STATE_DIR/log-checkpoint.json"
 
 UUID_RE='^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
 
@@ -136,72 +136,124 @@ wake_agent_d() { # wake_agent_d <metadata-json>
   ) 9>"$STATE_DIR/supervisor.lock"
 }
 
-# --- log scanning (C1: generation continuity; E1: hold on persistence failure;
-#     V5-F4: byte-exact; persist-before-advance) ------------------------------------
-CONT="$STATE_DIR/log-continuity.json"
-continuity_read() { jq -r "$1" "$CONT" 2>/dev/null || echo ""; }
+# --- log scanning (P2: one atomic checkpoint; C1: generation continuity;
+#     E1: hold on persistence failure; V5-F4: byte-exact; P3: gap notification) ----
 prefix_digest_at() { # prefix_digest_at CURSOR -> the sha256 of the ENTIRE prefix [0, CURSOR)
   # The full prefix (not a trailing window) is hashed: an equal-size replacement
-  # whose differences lie EARLIER in the file must still be detected — only a
-  # whole-prefix digest catches every rewrite. sha256 over an appended-to log's
-  # prefix is O(log size) per cycle and cheap in practice.
+  # whose differences lie EARLIER in the file must still be detected. NOTE: the
+  # cost is LINEAR in the prefix size (not logarithmic) — every cycle rehashes
+  # everything before the cursor; acceptable for appended-to daemon logs, and the
+  # correctness requirement (C1) demands it.
   local cursor="$1"
   if [ "$cursor" -le 0 ]; then echo "(empty)"; return; fi
   head -c "$cursor" "$DAEMON_LOG" 2>/dev/null | sha256sum | awk '{print $1}'
 }
-persist_log_gap() { # persist_log_gap PRIOR_CURSOR PRIOR_SIZE OLD_INO NEW_INO — the structured, visible, never-auto-resolved gap record
-  local key from to oi ni
+checkpoint_write() { # checkpoint_write CURSOR INODE SIZE — ONE atomic write (P2)
+  local tmp="$CHECKPOINT.tmp.$$.$RANDOM"
+  if ! printf '{ "cursor": "%s", "inode": "%s", "size": "%s", "prefixDigest": "%s" }' \
+      "$1" "$2" "$3" "$(prefix_digest_at "$1")" > "$tmp" 2>/dev/null; then
+    rm -f "$tmp"; echo "ERROR: checkpoint write failed" >&2; return 1
+  fi
+  if ! mv "$tmp" "$CHECKPOINT" 2>/dev/null; then
+    rm -f "$tmp"; echo "ERROR: checkpoint atomic rename failed" >&2; return 1
+  fi
+}
+checkpoint_read() { jq -r "$1" "$CHECKPOINT" 2>/dev/null || echo ""; }
+
+# P3: persist the gap record AND its companion notification event in ONE atomic
+# store write — the companion (kind log-gap, pending) is what the wake loop
+# delivers; the gap record itself stays unresolved until manual reconciliation.
+persist_log_gap() { # persist_log_gap PRIOR_CURSOR PRIOR_SIZE OLD_INO NEW_INO
+  local key from to oi ni coord_sid tmp
   from="$1"; to="$2"; oi="$3"; ni="$4"
   key="log-gap:$oi:$ni:$(date -u +%FT%TZ)"
   if event_exists "$key"; then return 0; fi
-  if ! event_set "$key" "$(jq -n --arg from "$from" --arg to "$to" --arg oi "$oi" --arg ni "$ni" --arg ts "$(date -u +%FT%TZ)" \
-    '{kind: "log-gap", seat: "D", sessionId: "coordinator", promptId: "00000000-0000-0000-0000-000000000000", outcome: "log-generation-change", observedAt: $ts, state: "unresolved", unobservedFrom: $from, unobservedTo: $to, oldInode: $oi, newInode: $ni, note: "a log generation change was detected; the interval [unobservedFrom, unobservedTo) of the previous generation was never observed. RECONCILIATION: compare each watched session turn-index (promptIds + timestamps) against the recorded events — a completion promptId present in a turn-index but absent from the event store within this window was unobserved; corroborate with GitHub branch/CI state. Never treat this interval as observed."}')"; then
+  coord_sid="$(bash "$ORCH" resolve "$AGENT_D_NAME" 2>/dev/null || echo 00000000-0000-0000-0000-000000000000)"
+  tmp="$EVENTS.tmp.$$.$RANDOM"
+  if ! jq --arg gk "$key" \
+      --arg from "$from" --arg to "$to" --arg oi "$oi" --arg ni "$ni" --arg ts "$(date -u +%FT%TZ)" \
+      --arg csid "$coord_sid" --arg cseat "$AGENT_D_NAME" \
+      '
+      .events[$gk] = {
+        kind: "log-gap", seat: "D", sessionId: "coordinator",
+        promptId: "00000000-0000-0000-0000-000000000000",
+        outcome: "log-generation-change", observedAt: $ts, state: "unresolved",
+        unobservedFrom: $from, unobservedTo: $to, oldInode: $oi, newInode: $ni,
+        note: "a log generation change was detected; the interval [unobservedFrom, unobservedTo) of the previous generation was never observed. RECONCILIATION: compare each watched session turn-index (promptIds + timestamps) against the recorded events — a completion promptId present in a turn-index but absent from the event store within this window was unobserved; corroborate with GitHub branch/CI state. Never treat this interval as observed."
+      }
+      | .events[("log-gap-notify:" + $gk)] = {
+        kind: "log-gap", seat: $cseat, sessionId: $csid,
+        promptId: "00000000-0000-0000-0000-000000000000",
+        outcome: "log-generation-change", observedAt: $ts, state: "pending",
+        attempts: 0, firstSeen: $ts, gapKey: $gk
+      }
+    ' "$EVENTS" > "$tmp" 2>/dev/null; then
+    rm -f "$tmp"
     log "LOG-GAP PERSISTENCE FAILED: $key (the scan will hold)"
     return 1
   fi
-  log "LOG-GAP RECORDED (unresolved, visible, never auto-resolved): $key unobserved=[$from,$to) oldInode=$oi newInode=$ni"
+  if ! mv "$tmp" "$EVENTS" 2>/dev/null; then
+    rm -f "$tmp"
+    log "LOG-GAP PERSISTENCE FAILED (rename): $key (the scan will hold)"
+    return 1
+  fi
+  log "LOG-GAP RECORDED (unresolved, visible, never auto-resolved) + companion notification queued: $key unobserved=[$from,$to) oldInode=$oi newInode=$ni"
 }
 
 scan_log_events() { # scan_log_events <dryrun:0|1>
-  local dryrun="$1" off_file="$STATE_DIR/log-offset" off cur region_len last_byte chunk last_part complete_region advance proc_rc
-  local ino prior_cursor prior_size prior_digest cur_digest
-  [ -f "$off_file" ] || {
-    local base_size base_ino
-    base_size="$(wc -c < "$DAEMON_LOG" 2>/dev/null | tr -d ' ')"
-    base_ino="$(stat -c %i "$DAEMON_LOG" 2>/dev/null || echo 0)"
-    echo "$base_size" > "$off_file"
-    printf '{ "inode": "%s", "size": "%s", "cursor": "%s", "prefixDigest": "%s" }' \
-      "$base_ino" "$base_size" "$base_size" "$(prefix_digest_at "$base_size")" > "$CONT"
-    log "log baseline set (no replay; the initial continuity snapshot recorded)"
-    return 0
-  }
-  off="$(cat "$off_file")"
+  local dryrun="$1" off cur region_len last_byte chunk last_part complete_region advance proc_rc
+  local ino prior_cursor prior_size prior_digest cur_digest legacy_off legacy_cont
+  # P2: the cursor, inode, size, and prefix digest persist as ONE atomic
+  # checkpoint. Legacy split state (log-offset / log-continuity) is recovered
+  # CONSERVATIVELY: a continuity gap is recorded and the scan restarts from 0 —
+  # continuity validation is never silently bypassed.
+  if [ ! -f "$CHECKPOINT" ]; then
+    if [ -f "$STATE_DIR/log-offset" ]; then
+      legacy_off="$(cat "$STATE_DIR/log-offset" 2>/dev/null | tr -d ' ')"
+      legacy_cont=""
+      [ -f "$STATE_DIR/log-continuity.json" ] && legacy_cont="$(jq -r '.size // 0' "$STATE_DIR/log-continuity.json" 2>/dev/null || echo 0)"
+      log "LEGACY split checkpoint state detected (log-offset=$legacy_off) — conservative recovery: a continuity gap is recorded and the scan restarts from 0"
+      if [ -n "$legacy_off" ] && [ "$legacy_off" -gt 0 ] 2>/dev/null; then
+        cur="$(wc -c < "$DAEMON_LOG" 2>/dev/null | tr -d ' ')"
+        ino="$(stat -c %i "$DAEMON_LOG" 2>/dev/null || echo 0)"
+        persist_log_gap "$legacy_off" "${legacy_cont:-$legacy_off}" "legacy" "$ino" || return 1
+      fi
+      rm -f "$STATE_DIR/log-offset" "$STATE_DIR/log-continuity.json"
+      checkpoint_write 0 0 0 || return 1
+      off=0
+    else
+      # a fresh start: the baseline
+      cur="$(wc -c < "$DAEMON_LOG" 2>/dev/null | tr -d ' ')"
+      ino="$(stat -c %i "$DAEMON_LOG" 2>/dev/null || echo 0)"
+      checkpoint_write "$cur" "$ino" "$cur" || return 1
+      log "log baseline set (no replay; the initial continuity snapshot recorded)"
+      return 0
+    fi
+  else
+    off="$(checkpoint_read '.cursor // 0')"
+  fi
   cur="$(wc -c < "$DAEMON_LOG" 2>/dev/null | tr -d ' ')"
   ino="$(stat -c %i "$DAEMON_LOG" 2>/dev/null || echo 0)"
-  # C1: generation/continuity detection — the full-prefix digest at the
-  # recorded cursor plus the inode. A digest mismatch means the content at the
-  # cursor was rewritten (a NEW generation, whatever the size or inode): persist
-  # the structured log-gap record for the never-observed interval of the previous
-  # generation, then rescan the new generation from the start (event-ID dedup
-  # applies). An inode change with a MATCHING digest is a content-continuous
-  # copy-rotation — no gap, the cursor stands.
+  # C1: generation/continuity detection — the full-prefix digest at the recorded
+  # cursor plus the inode. A digest mismatch means the content at the cursor was
+  # rewritten (a NEW generation, whatever the size or inode): persist the
+  # structured log-gap record + companion (P3), then rescan from the start
+  # (event-ID dedup applies). An inode change with a MATCHING digest is a
+  # content-continuous copy-rotation — no gap, the cursor stands.
   if [ "$cur" -lt "$off" ]; then
     log "log shrank (rotation or truncation; old cursor $off > new size $cur) — a generation change (rescan from the start; event-ID dedup applies)"
-    if [ -f "$CONT" ]; then
-      persist_log_gap "$off" "$(continuity_read '.size // 0')" "$(continuity_read '.inode // 0')" "$ino" || return 1
-    fi
+    persist_log_gap "$off" "$(checkpoint_read '.size // 0')" "$(checkpoint_read '.inode // 0')" "$ino" || return 1
     off=0
-  elif [ -f "$CONT" ]; then
-    prior_cursor="$(continuity_read '.cursor // -1')"
-    prior_digest="$(continuity_read '.prefixDigest // ""')"
-    if [ "$prior_cursor" = "$off" ] && [ -n "$prior_digest" ]; then
+  else
+    prior_digest="$(checkpoint_read '.prefixDigest // ""')"
+    if [ -n "$prior_digest" ]; then
       cur_digest="$(prefix_digest_at "$off")"
       if [ "$cur_digest" != "$prior_digest" ]; then
-        prior_size="$(continuity_read '.size // 0')"
+        prior_size="$(checkpoint_read '.size // 0')"
         log "log generation CHANGE detected (prefix digest mismatch at cursor $off) — recording the log gap and rescanning from the start"
-        persist_log_gap "$off" "$prior_size" "$(continuity_read '.inode // 0')" "$ino" || return 1
+        persist_log_gap "$off" "$prior_size" "$(checkpoint_read '.inode // 0')" "$ino" || return 1
         off=0
-      elif [ "$(continuity_read '.inode // 0')" != "$ino" ]; then
+      elif [ "$(checkpoint_read '.inode // 0')" != "$ino" ]; then
         log "log file replaced with identical content at the cursor (inode change, digest continuous) — no gap; the cursor stands"
       fi
     fi
@@ -229,8 +281,6 @@ scan_log_events() { # scan_log_events <dryrun:0|1>
   if [ -n "$complete_region" ]; then
     # C3: a region with NO matching completion lines is an ORDINARY successful scan
     # (the cursor advances); only a matched event's persistence failure holds it.
-    # The filter is separated from the processing so grep's no-match exit cannot
-    # masquerade as a failure under pipefail.
     matches="$(printf '%s\n' "$complete_region" | grep -E 'prompt turn (completed|failed)' || true)"
     if [ -n "$matches" ]; then
       printf '%s\n' "$matches" | while IFS= read -r line; do
@@ -239,15 +289,16 @@ scan_log_events() { # scan_log_events <dryrun:0|1>
     fi
   fi
   if [ "$proc_rc" != "0" ]; then
-    # E1: a material event failed to persist — NEVER advance past it. The cursor
-    # holds at $off and the region (including the failed event) is retried on the
-    # next cycle once the underlying store failure is resolved.
-    log "SCAN HELD: event persistence failed (rc=$proc_rc) — cursor UNCHANGED at $off; the region will be retried"
+    # E1: a material event failed to persist — NEVER advance past it (P2: the
+    # single checkpoint is not written, so the cursor AND the continuity state
+    # stay exactly where they were).
+    log "SCAN HELD: event persistence failed (rc=$proc_rc) — checkpoint UNCHANGED at $off; the region will be retried"
     return 1
   fi
-  echo "$advance" > "$off_file"
-  printf '{ "inode": "%s", "size": "%s", "cursor": "%s", "prefixDigest": "%s" }' \
-    "$ino" "$cur" "$advance" "$(prefix_digest_at "$advance")" > "$CONT"
+  # P2: the cursor, inode, size, and digest advance in ONE atomic write — a crash
+  # at any point leaves either the complete prior checkpoint or the complete new
+  # one; a torn state is impossible.
+  checkpoint_write "$advance" "$ino" "$cur" || return 1
 }
 
 process_log_line() { # process_log_line LINE dryrun
@@ -330,20 +381,43 @@ deliver_pending() { # deliver_pending <dryrun:0|1>
   done
 }
 
-# --- permission-wait EPISODES (V5-F3 + C2: the event IS the durable record) ---------
-perm_state_get() { jq -r --arg s "$1" '.sessions[$s].waiting // false' "$PERMSTATE" 2>/dev/null || echo false; }
-perm_state_set() { # perm_state_set SID WAITING EPISODES
-  local tmp="$PERMSTATE.tmp.$$.$RANDOM"
-  if ! jq --arg s "$1" --argjson w "$2" --argjson n "$3" \
-    '.sessions[$s] = {waiting: $w, episodes: $n}' "$PERMSTATE" > "$tmp" 2>/dev/null; then
-    rm -f "$tmp"; echo "ERROR: perm-state serialization failed" >&2; return 1
+# --- permission-wait EPISODES (P1: ONE atomic event-store transaction) --------------
+# The episode state (permState) lives INSIDE the event store document: the event
+# insertion and the state transition commit together in ONE jq write (temp+mv).
+# A failure before commit leaves BOTH unchanged; a successful commit preserves
+# BOTH. The episode number comes from the authoritative permState counter —
+# never from the count of existing events alone.
+perm_waiting_get() { jq -r --arg s "$1" '.permState[$s].waiting // false' "$EVENTS" 2>/dev/null || echo false; }
+perm_episodes_get() { jq -r --arg s "$1" '.permState[$s].episodes // 0' "$EVENTS" 2>/dev/null || echo 0; }
+
+perm_transition_atomic() { # perm_transition_atomic SID SEAT EPISODES KEY FIELDS_JSON -> 0 ok
+  # ONE atomic write: insert the episode event AND set permState[sid] = {waiting: true, episodes: N}
+  local tmp
+  tmp="$EVENTS.tmp.$$.$RANDOM"
+  if ! jq --arg k "$4" --argjson f "$5" --arg s "$1" --argjson n "$3" \
+      '.events[$k] = $f | .permState[$s] = {waiting: true, episodes: $n}' \
+      "$EVENTS" > "$tmp" 2>/dev/null; then
+    rm -f "$tmp"
+    log "PERM-EPISODE TRANSACTION FAILED (serialization): $4 — both the event and the state are UNCHANGED; retried next cycle"
+    return 1
   fi
-  if ! mv "$tmp" "$PERMSTATE" 2>/dev/null; then
-    rm -f "$tmp"; echo "ERROR: perm-state atomic rename failed" >&2; return 1
+  if ! mv "$tmp" "$EVENTS" 2>/dev/null; then
+    rm -f "$tmp"
+    log "PERM-EPISODE TRANSACTION FAILED (rename): $4 — both the event and the state are UNCHANGED; retried next cycle"
+    return 1
   fi
 }
-perm_episode_next() { # perm_episode_next SID -> the next episode number, DERIVED FROM THE EVENT STORE
-  jq -r --arg s "$1" '[.events[] | select((.kind == "permission-wait") and (.sessionId == $s))] | length + 1' "$EVENTS" 2>/dev/null || echo 1
+
+perm_clear_atomic() { # perm_clear_atomic SID EPISODES -> 0 ok — the clearance transition (no event)
+  local tmp
+  tmp="$EVENTS.tmp.$$.$RANDOM"
+  if ! jq --arg s "$1" --argjson n "$2" '.permState[$s] = {waiting: false, episodes: $n}' \
+      "$EVENTS" > "$tmp" 2>/dev/null; then
+    rm -f "$tmp"; log "PERM-CLEARANCE WRITE FAILED: $1 (retried next cycle)"; return 1
+  fi
+  if ! mv "$tmp" "$EVENTS" 2>/dev/null; then
+    rm -f "$tmp"; log "PERM-CLEARANCE WRITE FAILED (rename): $1"; return 1
+  fi
 }
 
 check_permission_waits() { # check_permission_waits <dryrun:0|1>
@@ -353,36 +427,29 @@ check_permission_waits() { # check_permission_waits <dryrun:0|1>
     sid="$(bash "$ORCH" resolve "$name" 2>/dev/null)" || continue
     st="$(bash "$ORCH" status "$sid" 2>/dev/null)" || continue
     perm="$(echo "$st" | jq -r '.isWaitingForPermission // false' 2>/dev/null || echo false)"
-    prior="$(perm_state_get "$sid")"
+    prior="$(perm_waiting_get "$sid")"
     if [ "$perm" = "true" ] && [ "$prior" != "true" ]; then
-      # C2: the EVENT is persisted FIRST (the durable record); the episode number is
-      # DERIVED from the store, and the exists-check makes the transition idempotent
-      # — if the perm-state write later fails, the next cycle recomputes the SAME
-      # episode number and the exists-check prevents any duplicate. A permission
-      # episode is never considered recorded until its event is durably persisted.
-      episodes="$(perm_episode_next "$sid")"
+      # P1: the authoritative episode counter + ONE atomic event+state transaction
+      episodes=$(( $(perm_episodes_get "$sid") + 1 ))
       key="perm-wait:$sid:episode:$episodes"
       if event_exists "$key"; then
-        : # the event already exists (a prior state-write failure) — no duplicate
+        : # the event exists from a legacy partial state — repair only the state
+        perm_transition_atomic "$sid" "$(jq -r --arg n "$name" '.seatOf[$n] // $n' "$STATE_DIR/seats.json" 2>/dev/null || echo "$name")" "$episodes" "$key" "$(event_get "$key")" \
+          || continue
+        log "PERM-EPISODE STATE REPAIRED (legacy partial state; the event unchanged, no duplicate): $key"
       else
         seat_label="$(jq -r --arg n "$name" '.seatOf[$n] // $n' "$STATE_DIR/seats.json" 2>/dev/null || echo "$name")"
-        if ! event_set "$key" "$(jq -n --arg seat "$seat_label" --arg sid "$sid" --arg pid "$(cat /proc/sys/kernel/random/uuid 2>/dev/null || echo 00000000-0000-0000-0000-000000000000)" --arg ts "$(date -u +%FT%TZ)" --argjson ep "$episodes" \
+        if ! perm_transition_atomic "$sid" "$seat_label" "$episodes" "$key" "$(jq -n --arg seat "$seat_label" --arg sid "$sid" --arg pid "$(cat /proc/sys/kernel/random/uuid 2>/dev/null || echo 00000000-0000-0000-0000-000000000000)" --arg ts "$(date -u +%FT%TZ)" --argjson ep "$episodes" \
           '{kind: "permission-wait", seat: $seat, sessionId: $sid, promptId: $pid, outcome: "waiting", observedAt: $ts, state: "pending", attempts: 0, firstSeen: $ts, episode: $ep}')"; then
-          log "PERM-EVENT PERSISTENCE FAILED: $key (the episode is NOT recorded; the state is not advanced — retried next cycle)"
           return 1
         fi
-        log "EVENT PERSISTED (pending, episode $episodes): $key"
+        log "EVENT PERSISTED + STATE ADVANCED (one atomic transaction, episode $episodes): $key"
       fi
-      # only NOW is the episode considered recorded (the state write is a cache;
-      # its failure is self-healing via the store-derived episode number)
-      perm_state_set "$sid" true "$episodes" || log "perm-state write failed (self-healing: the store-derived episode number prevents duplicates)"
     elif [ "$perm" = "true" ] && [ "$prior" = "true" ]; then
       : # a continuous, unchanged wait — no repeated alert (V5-F3)
     else
-      # perm == false: confirmed clearance — reset the wait state (keep the counter)
-      episodes="$(perm_episode_next "$sid")"
-      episodes=$((episodes - 1))
-      perm_state_set "$sid" false "$episodes" 2>/dev/null || true
+      # perm == false: confirmed clearance — reset the wait state atomically (keep the counter)
+      perm_clear_atomic "$sid" "$(perm_episodes_get "$sid")" 2>/dev/null || true
     fi
   done
 }
@@ -469,8 +536,8 @@ case "${1:-status}" in
   status)
     echo "--- supervisor state ($STATE_DIR) ---"
     echo "[events]"; jq . "$EVENTS"
-    echo "[perm-state]"; jq . "$PERMSTATE"
-    for f in seats.json log-offset wake.log supervisor.log; do
+    echo "[perm-state (inside the event store)]"; jq .permState "$EVENTS" 2>/dev/null
+    for f in seats.json log-checkpoint.json wake.log supervisor.log; do
       [ -f "$STATE_DIR/$f" ] && { echo "[$f]"; tail -n 10 "$STATE_DIR/$f" 2>/dev/null; echo; }
     done
     ;;

@@ -176,8 +176,10 @@ validate_meta() { # validate_meta JSON -> 0 ok; nonzero refuse
       and ((.promptId | type) == "string") and (.promptId | test("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"))
       and ((.seat | type) == "string") and ((.seat | length) > 0) and ((.seat | length) <= 8)
       # C4: the kind/outcome pairing — contradictory combinations refuse
+      # (P3: log-gap companions carry kind log-gap / outcome log-generation-change)
       and ((.kind == "worker-turn" and (.outcome == "completed" or .outcome == "failed"))
-           or (.kind == "permission-wait" and .outcome == "waiting"))
+           or (.kind == "permission-wait" and .outcome == "waiting")
+           or (.kind == "log-gap" and .outcome == "log-generation-change"))
     ' >/dev/null 2>&1
 }
 

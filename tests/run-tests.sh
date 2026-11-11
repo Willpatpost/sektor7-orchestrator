@@ -187,7 +187,7 @@ cat >> "$WORK/daemon-mock.log" <<EOF
 EOF
 expect_ok "T11b-event-cycle" bash "$SUP" run --once
 check  "T11b-pending-not-lost" "jq -e '.events[\"log:$SID:bbbb2222-2222-2222-2222-222222222222:completed\"].state == \"pending\"' \"$WORK/state5/events.json\" >/dev/null"
-check  "T11b-offset-advanced" "[ \"\$(cat \"$WORK/state5/log-offset\")\" -gt 0 ]"
+check  "T11b-offset-advanced" "[ \"\$(jq -r '.cursor' \"$WORK/state5/log-checkpoint.json\")\" -gt 0 ]"
 
 if grep -r -q "mock-secret-token-DO-NOT-PRINT" "$WORK" --include="*.log" --include="*.json" 2>/dev/null; then
   FAIL=$((FAIL+1)); echo "FAIL T12-token-redaction"
@@ -333,11 +333,11 @@ fi
 export SEKTOR7_STATE_DIR="$WORK/state13"; mkdir -p "$WORK/state13"
 cp "$WORK/state/seats.json" "$WORK/state13/seats.json"
 expect_ok "C9a-baseline" bash "$SUP" run --once --dry-run
-OFF_BEFORE="$(cat "$WORK/state13/log-offset")"
+OFF_BEFORE="$(jq -r '.cursor' "$WORK/state13/log-checkpoint.json")"
 printf '%s' "2026-11-11T18:20:00.000Z [INFO] [DAEMON] sessionId=$SID promptId=eeee5555-5555-5555-5555-555555555555 prompt turn comp" >> "$WORK/daemon-mock.log"
 expect_ok "C9b-partial-line-cycle" bash "$SUP" run --once --dry-run
 check  "C9b-no-event-from-partial" "[ \"\$(jq '.events | length' \"$WORK/state13/events.json\")\" = 0 ]"
-check  "C9b-offset-held" "[ \"\$(cat \"$WORK/state13/log-offset\")\" = \"$OFF_BEFORE\" ]"
+check  "C9b-offset-held" "[ \"\$(jq -r '.cursor' \"$WORK/state13/log-checkpoint.json\")\" = \"$OFF_BEFORE\" ]"
 printf 'leted\n' >> "$WORK/daemon-mock.log"
 expect_ok "C9c-completed-line-cycle" bash "$SUP" run --once --dry-run
 check  "C9c-event-after-completion" "[ \"\$(jq '.events | length' \"$WORK/state13/events.json\")\" = 1 ]"
@@ -535,16 +535,16 @@ export SEKTOR7_STATE_DIR="$WORK/state24"; mkdir -p "$WORK/state24"
 cp "$WORK/state/seats.json" "$WORK/state24/seats.json"
 scenario "{\"sessions\":{\"$SID\":{\"state\":\"idle\",\"permWait\":false},\"$SID_D\":{\"state\":\"idle\"}},\"postPrompt\":{\"ok\":true}}"
 expect_ok "V5F4-baseline" bash "$SUP" run --once --dry-run
-OFF4="$(cat "$WORK/state24/log-offset")"
+OFF4="$(jq -r '.cursor' "$WORK/state24/log-checkpoint.json")"
 printf '%s' "2026-11-11T18:40:00.000Z [INFO] [DAEMON] sessionId=$SID promptId=789a789a-9a9a-9a9a-9a9a-9a9a9a9a9a9a prompt turn completed — ✓ caf" >> "$WORK/daemon-mock.log"
 expect_ok "V5F4-partial-multibyte-cycle" bash "$SUP" run --once --dry-run
 check  "V5F4-no-event-from-partial" "jq -e '[.events[] | select(.kind == \"worker-turn\")] | length == 0' \"$WORK/state24/events.json\" >/dev/null"
-check  "V5F4-offset-held-byte-exact" "[ \"\$(cat \"$WORK/state24/log-offset\")\" = \"$OFF4\" ]"
+check  "V5F4-offset-held-byte-exact" "[ \"\$(jq -r '.cursor' \"$WORK/state24/log-checkpoint.json\")\" = \"$OFF4\" ]"
 printf 'é\n' >> "$WORK/daemon-mock.log"
 expect_ok "V5F4-completed-cycle" bash "$SUP" run --once --dry-run
 check  "V5F4-event-after-completion" "jq -e '[.events[] | select(.kind == \"worker-turn\")] | length == 1' \"$WORK/state24/events.json\" >/dev/null"
 FSIZE4="$(wc -c < "$WORK/daemon-mock.log" | tr -d ' ')"
-check  "V5F4-cursor-byte-exact-advanced" "[ \"\$(cat \"$WORK/state24/log-offset\")\" = \"$FSIZE4\" ]"
+check  "V5F4-cursor-byte-exact-advanced" "[ \"\$(jq -r '.cursor' \"$WORK/state24/log-checkpoint.json\")\" = \"$FSIZE4\" ]"
 
 # --- round-4 regressions (E) ----------------------------------------------------------
 # E1a: a corrupted event store (invalid JSON) — the cursor HOLDS, no false
@@ -553,32 +553,32 @@ export SEKTOR7_STATE_DIR="$WORK/state25"; mkdir -p "$WORK/state25"
 cp "$WORK/state/seats.json" "$WORK/state25/seats.json"
 scenario "{\"sessions\":{\"$SID\":{\"state\":\"idle\",\"permWait\":false},\"$SID_D\":{\"state\":\"idle\"}},\"postPrompt\":{\"ok\":true}}"
 expect_ok "E1a-baseline" bash "$SUP" run --once --dry-run
-OFF_E1="$(cat "$WORK/state25/log-offset")"
+OFF_E1="$(jq -r '.cursor' "$WORK/state25/log-checkpoint.json")"
 printf 'this is not valid json' > "$WORK/state25/events.json"
 cat >> "$WORK/daemon-mock.log" <<EOF
 2026-11-11T18:45:00.000Z [INFO] [DAEMON] sessionId=$SID promptId=90bc90bc-bcbc-bcbc-bcbc-bcbcbcbcbcbc prompt turn completed
 EOF
 expect_ok "E1a-corrupted-store-cycle" bash "$SUP" run --once
-check  "E1a-cursor-held" "[ \"\$(cat \"$WORK/state25/log-offset\")\" = \"$OFF_E1\" ]"
+check  "E1a-cursor-held" "[ \"\$(jq -r '.cursor' \"$WORK/state25/log-checkpoint.json\")\" = \"$OFF_E1\" ]"
 check  "E1a-no-false-persistence" "! grep -q 'EVENT PERSISTED.*90bc90bc' \"$WORK/state25/supervisor.log\""
 check  "E1a-scan-held-logged" "grep -q 'SCAN HELD' \"$WORK/state25/supervisor.log\""
 printf '{"events":{}}' > "$WORK/state25/events.json"
 expect_ok "E1a-repair-cycle" bash "$SUP" run --once
 check  "E1a-recovered-exactly-once" "jq -e '[.events[] | select(.promptId == \"90bc90bc-bcbc-bcbc-bcbc-bcbcbcbcbcbc\")] | length == 1' \"$WORK/state25/events.json\" >/dev/null"
-check  "E1a-cursor-advanced-after-repair" "[ \"\$(cat \"$WORK/state25/log-offset\")\" -gt \"$OFF_E1\" ]"
+check  "E1a-cursor-advanced-after-repair" "[ \"\$(jq -r '.cursor' \"$WORK/state25/log-checkpoint.json\")\" -gt \"$OFF_E1\" ]"
 
 # E1b: an atomic-rename failure (the event store replaced by a directory)
 export SEKTOR7_STATE_DIR="$WORK/state26"; mkdir -p "$WORK/state26"
 cp "$WORK/state/seats.json" "$WORK/state26/seats.json"
 expect_ok "E1b-baseline" bash "$SUP" run --once --dry-run
-OFF_E1B="$(cat "$WORK/state26/log-offset")"
+OFF_E1B="$(jq -r '.cursor' "$WORK/state26/log-checkpoint.json")"
 rm -f "$WORK/state26/events.json"
 mkdir -p "$WORK/state26/events.json"
 cat >> "$WORK/daemon-mock.log" <<EOF
 2026-11-11T18:46:00.000Z [INFO] [DAEMON] sessionId=$SID promptId=12cd12cd-cdcd-cdcd-cdcd-cdcdcdcdcdcd prompt turn completed
 EOF
 expect_ok "E1b-rename-failure-cycle" bash "$SUP" run --once
-check  "E1b-cursor-held" "[ \"\$(cat \"$WORK/state26/log-offset\")\" = \"$OFF_E1B\" ]"
+check  "E1b-cursor-held" "[ \"\$(jq -r '.cursor' \"$WORK/state26/log-checkpoint.json\")\" = \"$OFF_E1B\" ]"
 check  "E1b-failure-logged" "grep -q 'SCAN HELD\|EVENT PERSISTENCE FAILED' \"$WORK/state26/supervisor.log\""
 rmdir "$WORK/state26/events.json"
 printf '{"events":{}}' > "$WORK/state26/events.json"
@@ -613,14 +613,14 @@ expect_ok "E2b-baseline-on-first-generation" bash "$SUP" run --once --dry-run
 printf '2026-11-11T19:05:00.000Z [INFO] [DAEMON] sessionId=%s promptId=56ab56ab-abab-abab-abab-abababababab prompt turn completed\n' "$SID" >> "$WORK/daemon-mock.log"
 expect_ok "E2b-first-completion-cycle" bash "$SUP" run --once --dry-run
 check  "E2b-first-generation-recorded" "jq -e '[.events[] | select(.promptId == \"56ab56ab-abab-abab-abab-abababababab\")] | length == 1' \"$WORK/state28/events.json\" >/dev/null"
-echo 100000 > "$WORK/state28/log-offset"
+printf '{ "cursor": "100000", "inode": "1", "size": "100000", "prefixDigest": "stale" }' > "$WORK/state28/log-checkpoint.json"
 printf '2026-11-11T19:05:00.000Z [INFO] [DAEMON] sessionId=%s promptId=56ab56ab-abab-abab-abab-abababababab prompt turn completed\n2026-11-11T19:06:00.000Z [INFO] [DAEMON] sessionId=%s promptId=78cd78cd-cdcd-cdcd-cdcd-cdcdcdcdcdcd prompt turn completed\n2026-11-11T19:07:00.000Z [INFO] [DAEMON] extra filler line\n' "$SID" "$SID" > "$WORK/daemon-mock.log"
 expect_ok "E2b-longer-replacement-cycle" bash "$SUP" run --once --dry-run
 check  "E2b-rotation-path-logged" "grep -q 'log shrank' \"$WORK/state28/supervisor.log\""
 check  "E2b-seen-event-not-refired" "jq -e '[.events[] | select(.promptId == \"56ab56ab-abab-abab-abab-abababababab\")] | length == 1' \"$WORK/state28/events.json\" >/dev/null"
 check  "E2b-new-event-recorded" "jq -e '[.events[] | select(.promptId == \"78cd78cd-cdcd-cdcd-cdcd-cdcdcdcdcdcd\")] | length == 1' \"$WORK/state28/events.json\" >/dev/null"
 FS28="$(wc -c < "$WORK/daemon-mock.log" | tr -d ' ')"
-check  "E2b-cursor-advanced-to-size" "[ \"\$(cat \"$WORK/state28/log-offset\")\" = \"$FS28\" ]"
+check  "E2b-cursor-advanced-to-size" "[ \"\$(jq -r '.cursor' \"$WORK/state28/log-checkpoint.json\")\" = \"$FS28\" ]"
 
 # E3: notification-integrity binding
 export SEKTOR7_STATE_DIR="$WORK/state29"; mkdir -p "$WORK/state29"
@@ -647,18 +647,18 @@ export SEKTOR7_STATE_DIR="$WORK/state30"; mkdir -p "$WORK/state30"
 cp "$WORK/state/seats.json" "$WORK/state30/seats.json"
 scenario "{\"sessions\":{\"$SID\":{\"state\":\"idle\",\"permWait\":false},\"$SID_D\":{\"state\":\"idle\"}},\"postPrompt\":{\"ok\":true}}"
 expect_ok "C3-baseline" bash "$SUP" run --once --dry-run
-OFF_C3="$(cat "$WORK/state30/log-offset")"
+OFF_C3="$(jq -r '.cursor' "$WORK/state30/log-checkpoint.json")"
 printf 'filler line with no completion records at all\nanother filler line\n' >> "$WORK/daemon-mock.log"
 expect_ok "C3-filler-region-cycle" bash "$SUP" run --once --dry-run
 check  "C3-no-fake-hold" "! grep -q 'SCAN HELD' \"$WORK/state30/supervisor.log\""
-CURS_C3="$(cat "$WORK/state30/log-offset")"
+CURS_C3="$(jq -r '.cursor' "$WORK/state30/log-checkpoint.json")"
 check  "C3-cursor-advanced" "[ \"$CURS_C3\" -gt \"$OFF_C3\" ]"
 # C3b: a matching line with malformed ids — no event, no failure, advance
 printf 'weird prompt turn completed with no ids\n' >> "$WORK/daemon-mock.log"
 expect_ok "C3b-malformed-line-cycle" bash "$SUP" run --once --dry-run
 check  "C3b-no-event" "[ \"\$(jq '.events | length' \"$WORK/state30/events.json\")\" = 0 ]"
 check  "C3b-no-fake-hold" "! grep -q 'SCAN HELD' \"$WORK/state30/supervisor.log\""
-check  "C3b-cursor-advanced" "[ \"\$(cat \"$WORK/state30/log-offset\")\" -gt \"$CURS_C3\" ]"
+check  "C3b-cursor-advanced" "[ \"\$(jq -r '.cursor' \"$WORK/state30/log-checkpoint.json\")\" -gt \"$CURS_C3\" ]"
 
 # C1: generation continuity via the rolling prefix digest (no artificial cursors)
 # C1-shorter: a genuine replacement SHORTER than the real cursor, containing an
@@ -672,7 +672,7 @@ expect_ok "C1s-gen1-cycle" bash "$SUP" run --once --dry-run
 check  "C1s-gen1-event" "jq -e '[.events[] | select(.promptId == \"9a9a9a9a-1111-1111-1111-111111111111\")] | length == 1' \"$WORK/state31/events.json\" >/dev/null"
 printf 'gen2 short: 2026-11-11T19:11:00.000Z [INFO] [DAEMON] sessionId=%s promptId=9b9b9b9b-2222-2222-2222-222222222222 prompt turn completed\n' "$SID" > "$WORK/daemon-mock.log"
 expect_ok "C1s-shorter-replacement-cycle" bash "$SUP" run --once --dry-run
-check  "C1s-gap-recorded" "jq -e '[.events[] | select(.kind == \"log-gap\")] | length == 1' \"$WORK/state31/events.json\" >/dev/null"
+check  "C1s-gap-recorded" "jq -e '[.events[] | select(.kind == \"log-gap\" and .state == \"unresolved\")] | length == 1' \"$WORK/state31/events.json\" >/dev/null"
 check  "C1s-gap-unresolved" "jq -e '[.events[] | select(.kind == \"log-gap\")][0].state == \"unresolved\"' \"$WORK/state31/events.json\" >/dev/null"
 check  "C1s-unobserved-completion-recovered" "jq -e '[.events[] | select(.promptId == \"9b9b9b9b-2222-2222-2222-222222222222\")] | length == 1' \"$WORK/state31/events.json\" >/dev/null"
 check  "C1s-prior-event-preserved" "jq -e '[.events[] | select(.promptId == \"9a9a9a9a-1111-1111-1111-111111111111\")] | length == 1' \"$WORK/state31/events.json\" >/dev/null"
@@ -700,7 +700,7 @@ else
   if [ "$SZ1" = "$SZ2" ]; then PASS=$((PASS+1)); echo "PASS C1e-genuinely-equal-size"; else FAIL=$((FAIL+1)); echo "FAIL C1e-genuinely-equal-size ($SZ1 vs $SZ2)"; fi
 fi
 expect_ok "C1e-equal-replacement-cycle" bash "$SUP" run --once --dry-run
-check  "C1e-gap-recorded" "jq -e '[.events[] | select(.kind == \"log-gap\")] | length == 1' \"$WORK/state32/events.json\" >/dev/null"
+check  "C1e-gap-recorded" "jq -e '[.events[] | select(.kind == \"log-gap\" and .state == \"unresolved\")] | length == 1' \"$WORK/state32/events.json\" >/dev/null"
 check  "C1e-unobserved-completion-recovered" "jq -e '[.events[] | select(.promptId == \"b2b2b2b2-4444-4444-4444-444444444444\")] | length == 1' \"$WORK/state32/events.json\" >/dev/null"
 
 # C1-longer: a genuine replacement LONGER than the real cursor with rewritten
@@ -711,18 +711,18 @@ printf 'gen1 baseline\n' > "$WORK/daemon-mock.log"
 expect_ok "C1l-baseline" bash "$SUP" run --once --dry-run
 printf '2026-11-11T19:30:00.000Z [INFO] [DAEMON] sessionId=%s promptId=c3c3c3c3-5555-5555-5555-555555555555 prompt turn completed\n' "$SID" >> "$WORK/daemon-mock.log"
 expect_ok "C1l-gen1-cycle" bash "$SUP" run --once --dry-run
-REAL_CURSOR="$(cat "$WORK/state33/log-offset")"
+REAL_CURSOR="$(jq -r '.cursor' "$WORK/state33/log-checkpoint.json")"
 printf 'gen2 start rewritten: 2026-11-11T19:31:00.000Z [INFO] [DAEMON] sessionId=%s promptId=d4d4d4d4-6666-6666-6666-666666666666 prompt turn completed\nand a second line: 2026-11-11T19:32:00.000Z [INFO] [DAEMON] sessionId=%s promptId=e5e5e5e5-7777-7777-7777-777777777777 prompt turn completed\n' "$SID" "$SID" > "$WORK/daemon-mock.log"
 NEW_SIZE="$(wc -c < "$WORK/daemon-mock.log" | tr -d ' ')"
 check  "C1l-genuinely-longer" "[ \"$NEW_SIZE\" -gt \"$REAL_CURSOR\" ]"
 expect_ok "C1l-longer-replacement-cycle" bash "$SUP" run --once --dry-run
-check  "C1l-gap-recorded" "jq -e '[.events[] | select(.kind == \"log-gap\")] | length == 1' \"$WORK/state33/events.json\" >/dev/null"
+check  "C1l-gap-recorded" "jq -e '[.events[] | select(.kind == \"log-gap\" and .state == \"unresolved\")] | length == 1' \"$WORK/state33/events.json\" >/dev/null"
 check  "C1l-unobserved-completions-recovered" "jq -e '[.events[] | select(.promptId == \"d4d4d4d4-6666-6666-6666-666666666666\" or .promptId == \"e5e5e5e5-7777-7777-7777-777777777777\")] | length == 2' \"$WORK/state33/events.json\" >/dev/null"
 
 # C1-continuous-append control: a pure append — NO gap record
 printf '2026-11-11T19:33:00.000Z [INFO] [DAEMON] sessionId=%s promptId=f6f6f6f6-8888-8888-8888-888888888888 prompt turn completed\n' "$SID" >> "$WORK/daemon-mock.log"
 expect_ok "C1a-append-control-cycle" bash "$SUP" run --once --dry-run
-check  "C1a-no-spurious-gap" "jq -e '[.events[] | select(.kind == \"log-gap\")] | length == 1' \"$WORK/state33/events.json\" >/dev/null"
+check  "C1a-no-spurious-gap" "jq -e '[.events[] | select(.kind == \"log-gap\" and .state == \"unresolved\")] | length == 1' \"$WORK/state33/events.json\" >/dev/null"
 check  "C1a-append-event-recorded" "jq -e '[.events[] | select(.promptId == \"f6f6f6f6-8888-8888-8888-888888888888\")] | length == 1' \"$WORK/state33/events.json\" >/dev/null"
 
 # C2: a permission episode is not considered recorded until its event persists
@@ -732,8 +732,8 @@ scenario "{\"sessions\":{\"$SID\":{\"state\":\"idle\",\"permWait\":true},\"$SID_
 printf 'corrupt the store' > "$WORK/state34/events.json"
 expect_ok "C2-failing-write-cycle" bash "$SUP" run --once
 check  "C2-episode-not-recorded" "jq -e '[.events[] | select(.kind == \"permission-wait\")] | length == 0' \"$WORK/state34/events.json\" >/dev/null || [ \"\$(cat \"$WORK/state34/events.json\")\" = \"corrupt the store\" ]"
-check  "C2-state-not-advanced" "jq -e '.sessions[\"$SID\"].waiting == true' \"$WORK/state34/perm-state.json\" >/dev/null 2>&1 || true"
-printf '{"events":{}}' > "$WORK/state34/events.json"
+check  "C2-state-not-advanced" "! jq -e --arg s \"$SID\" '.permState[\$s].waiting == true' \"$WORK/state34/events.json\" >/dev/null 2>&1 || [ \"\$(cat \"$WORK/state34/events.json\")\" = \"corrupt the store\" ]"
+printf '{"events":{},"permState":{}}' > "$WORK/state34/events.json"
 expect_ok "C2-repair-cycle" bash "$SUP" run --once
 N_C2="$(jq -r '[.events[] | select(.kind == "permission-wait")] | length' "$WORK/state34/events.json")"
 check  "C2-exactly-one-event" "[ \"$N_C2\" = 1 ]"
@@ -768,6 +768,92 @@ export SEKTOR7_STATE_DIR="$WORK/state36"; mkdir -p "$WORK/state36"
 jq -n '{watch: ["coder-a8"], seatOf: {"coder-a8": "B"}}' > "$WORK/state36/seats.json"
 expect_fail "C4e-no-coordinator-refuses-run" "no coordinator session configured" bash "$SUP" run --once
 
+# --- round-6 regressions (P) ----------------------------------------------------------
+# P1: a crash between the event persistence and the state update — with the atomic
+# transaction this state is unreachable; the LEGACY partial state (event exists,
+# permState absent) is REPAIRED without a duplicate
+export SEKTOR7_STATE_DIR="$WORK/state37"; mkdir -p "$WORK/state37"
+cp "$WORK/state/seats.json" "$WORK/state37/seats.json"
+scenario "{\"sessions\":{\"$SID\":{\"state\":\"idle\",\"permWait\":true},\"$SID_D\":{\"state\":\"idle\"}},\"postPrompt\":{\"ok\":true}}"
+# simulate the legacy crash window: the event for episode 1 exists, the state does not
+EP1KEY="perm-wait:$SID:episode:1"
+jq -n --arg k "$EP1KEY" --arg seat B --arg sid "$SID" --arg pid "aaaa1111-1111-1111-1111-111111111111" --arg ts "$(date -u +%FT%TZ)" \
+  '{events: {($k): {kind: "permission-wait", seat: $seat, sessionId: $sid, promptId: $pid, outcome: "waiting", observedAt: $ts, state: "pending", attempts: 0, firstSeen: $ts, episode: 1}}, permState: {}}' > "$WORK/state37/events.json"
+expect_ok "P1-legacy-partial-repair-cycle" bash "$SUP" run --once
+N_P1="$(jq -r '[.events[] | select(.kind == "permission-wait")] | length' "$WORK/state37/events.json")"
+check  "P1-no-duplicate-event" "[ \"$N_P1\" = 1 ]"
+check  "P1-state-repaired" "jq -e --arg s \"$SID\" '.permState[\$s].waiting == true and .permState[\$s].episodes == 1' \"$WORK/state37/events.json\" >/dev/null"
+scenario "{\"sessions\":{\"$SID\":{\"state\":\"idle\",\"permWait\":false},\"$SID_D\":{\"state\":\"idle\"}},\"postPrompt\":{\"ok\":true}}"
+expect_ok "P1-clearance" bash "$SUP" run --once
+scenario "{\"sessions\":{\"$SID\":{\"state\":\"idle\",\"permWait\":true},\"$SID_D\":{\"state\":\"idle\"}},\"postPrompt\":{\"ok\":true}}"
+expect_ok "P1-episode2" bash "$SUP" run --once
+N_P1B="$(jq -r '[.events[] | select(.kind == "permission-wait")] | length' "$WORK/state37/events.json")"
+check  "P1-episode2-distinct" "[ \"$N_P1B\" = 2 ]"
+check  "P1-episode2-number-from-state" "jq -e --arg s \"$SID\" '.permState[\$s].episodes == 2' \"$WORK/state37/events.json\" >/dev/null"
+
+# P1b: an atomic-transaction write failure (the corrupted store) leaves BOTH unchanged
+export SEKTOR7_STATE_DIR="$WORK/state38"; mkdir -p "$WORK/state38"
+cp "$WORK/state/seats.json" "$WORK/state38/seats.json"
+scenario "{\"sessions\":{\"$SID\":{\"state\":\"idle\",\"permWait\":true},\"$SID_D\":{\"state\":\"idle\"}},\"postPrompt\":{\"ok\":true}}"
+printf 'not json' > "$WORK/state38/events.json"
+expect_ok "P1b-tx-failure-cycle" bash "$SUP" run --once
+check  "P1b-store-unchanged" "[ \"\$(cat \"$WORK/state38/events.json\")\" = \"not json\" ]"
+printf '{"events":{},"permState":{}}' > "$WORK/state38/events.json"
+expect_ok "P1b-repair-cycle" bash "$SUP" run --once
+check  "P1b-exactly-one-after-repair" "jq -e '[.events[] | select(.kind == \"permission-wait\")] | length == 1' \"$WORK/state38/events.json\" >/dev/null"
+check  "P1b-both-committed" "jq -e --arg s \"$SID\" '.permState[\$s].waiting == true' \"$WORK/state38/events.json\" >/dev/null"
+
+# P2: the torn legacy checkpoint (log-offset written, continuity absent) — the
+# conservative recovery records a gap and rescans
+export SEKTOR7_STATE_DIR="$WORK/state39"; mkdir -p "$WORK/state39"
+cp "$WORK/state/seats.json" "$WORK/state39/seats.json"
+printf '2026-11-11T19:40:00.000Z [INFO] [DAEMON] sessionId=%s promptId=11aa11aa-bbbb-bbbb-bbbb-bbbbbbbbbbbb prompt turn completed\n' "$SID" > "$WORK/daemon-mock.log"
+echo 50 > "$WORK/state39/log-offset"
+expect_ok "P2-legacy-torn-recovery" bash "$SUP" run --once --dry-run
+check  "P2-gap-recorded" "jq -e '[.events[] | select(.kind == \"log-gap\" and .state == \"unresolved\")] | length == 1' \"$WORK/state39/events.json\" >/dev/null"
+check  "P2-completion-recovered" "jq -e '[.events[] | select(.promptId == \"11aa11aa-bbbb-bbbb-bbbb-bbbbbbbbbbbb\")] | length == 1' \"$WORK/state39/events.json\" >/dev/null"
+check  "P2-legacy-files-removed" "[ ! -f \"$WORK/state39/log-offset\" ]"
+check  "P2-checkpoint-written" "[ -f \"$WORK/state39/log-checkpoint.json\" ]"
+
+# P2b: a replacement AFTER an interrupted checkpoint — the completion cannot
+# silently disappear (the rescan recovers it)
+printf 'replacement gen: 2026-11-11T19:41:00.000Z [INFO] [DAEMON] sessionId=%s promptId=22bb22bb-cccc-cccc-cccc-cccccccccccc prompt turn completed\n' "$SID" > "$WORK/daemon-mock.log"
+expect_ok "P2b-replacement-after-recovery" bash "$SUP" run --once --dry-run
+check  "P2b-new-completion-recovered" "jq -e '[.events[] | select(.promptId == \"22bb22bb-cccc-cccc-cccc-cccccccccccc\")] | length == 1' \"$WORK/state39/events.json\" >/dev/null"
+
+# P3: the log-gap companion notification — delivered once, the gap stays unresolved
+export SEKTOR7_STATE_DIR="$WORK/state40"; mkdir -p "$WORK/state40"
+cp "$WORK/state/seats.json" "$WORK/state40/seats.json"
+printf 'gen1: 2026-11-11T19:50:00.000Z [INFO] [DAEMON] sessionId=%s promptId=33cc33cc-dddd-dddd-dddd-dddddddddddd prompt turn completed\n' "$SID" > "$WORK/daemon-mock.log"
+scenario "{\"sessions\":{\"$SID\":{\"state\":\"idle\",\"permWait\":false},\"$SID_D\":{\"state\":\"idle\"}},\"postPrompt\":{\"ok\":true}}"
+expect_ok "P3-baseline" bash "$SUP" run --once --dry-run
+printf 'gen2 replaced: 2026-11-11T19:51:00.000Z [INFO] [DAEMON] sessionId=%s promptId=44dd44dd-eeee-eeee-eeee-eeeeeeeeeeee prompt turn completed\n' "$SID" > "$WORK/daemon-mock.log"
+reset_posts
+expect_ok "P3-gap-cycle" bash "$SUP" run --once
+check  "P3-companion-delivered" "jq -e '[.events[] | select(.kind == \"log-gap\" and .state == \"pending\")] | length == 0' \"$WORK/state40/events.json\" >/dev/null"
+check  "P3-gap-unresolved-preserved" "jq -e '[.events[] | select(.kind == \"log-gap\" and .state == \"unresolved\")] | length == 1' \"$WORK/state40/events.json\" >/dev/null"
+check  "P3-two-posts-companion-and-completion" "[ \"\$(count_posts)\" = 2 ]"
+expect_ok "P3-restart-dedup-cycle" bash "$SUP" run --once
+check  "P3-no-repeat-posts" "[ \"\$(count_posts)\" = 2 ]"
+check  "P3-gap-still-unresolved" "jq -e '[.events[] | select(.kind == \"log-gap\" and .state == \"unresolved\")] | length == 1' \"$WORK/state40/events.json\" >/dev/null"
+
+# P3b: busy-session deferral of the companion
+export SEKTOR7_STATE_DIR="$WORK/state41"; mkdir -p "$WORK/state41"
+cp "$WORK/state/seats.json" "$WORK/state41/seats.json"
+printf 'gen1: 2026-11-11T19:55:00.000Z [INFO] [DAEMON] sessionId=%s promptId=55ee55ee-ffff-ffff-ffff-ffffffffffff prompt turn completed\n' "$SID" > "$WORK/daemon-mock.log"
+scenario "{\"sessions\":{\"$SID\":{\"state\":\"idle\",\"permWait\":false},\"$SID_D\":{\"state\":\"idle\"}},\"postPrompt\":{\"ok\":true}}"
+expect_ok "P3b-baseline" bash "$SUP" run --once --dry-run
+printf 'gen2: 2026-11-11T19:56:00.000Z [INFO] [DAEMON] sessionId=%s promptId=66ff66ff-1111-1111-1111-111111111111 prompt turn completed\n' "$SID" > "$WORK/daemon-mock.log"
+scenario "{\"sessions\":{\"$SID\":{\"state\":\"idle\",\"permWait\":false},\"$SID_D\":{\"state\":\"active\"}},\"postPrompt\":{\"ok\":true}}"
+reset_posts
+expect_ok "P3b-busy-deferral-cycle" bash "$SUP" run --once
+check  "P3b-zero-posts-while-busy" "[ \"\$(count_posts)\" = 0 ]"
+check  "P3b-companion-pending" "jq -e '[.events[] | select(.kind == \"log-gap\" and .state == \"pending\")] | length == 1' \"$WORK/state41/events.json\" >/dev/null"
+scenario "{\"sessions\":{\"$SID\":{\"state\":\"idle\",\"permWait\":false},\"$SID_D\":{\"state\":\"idle\"}},\"postPrompt\":{\"ok\":true}}"
+expect_ok "P3b-delivery-after-idle" bash "$SUP" run --once
+check  "P3b-two-posts-after-idle" "[ \"\$(count_posts)\" = 2 ]"
+check  "P3b-gap-unresolved" "jq -e '[.events[] | select(.kind == \"log-gap\" and .state == \"unresolved\")] | length == 1' \"$WORK/state41/events.json\" >/dev/null"
+
 echo
-echo "RESULTS: pass=$PASS fail=$FAIL (round-5 battery v6; live wake-up evidence documented separately)"
+echo "RESULTS: pass=$PASS fail=$FAIL (round-6 battery v7; live wake-up evidence documented separately)"
 [ "$FAIL" -eq 0 ]

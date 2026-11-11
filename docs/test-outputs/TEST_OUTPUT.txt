@@ -210,5 +210,39 @@ PASS C4c-zero-posts
 PASS C4d-valid-config-end-to-end
 PASS C4d-one-post
 PASS C4e-no-coordinator-refuses-run
+PASS P1-legacy-partial-repair-cycle
+PASS P1-no-duplicate-event
+PASS P1-state-repaired
+PASS P1-clearance
+PASS P1-episode2
+PASS P1-episode2-distinct
+PASS P1-episode2-number-from-state
+PASS P1b-tx-failure-cycle
+PASS P1b-store-unchanged
+PASS P1b-repair-cycle
+PASS P1b-exactly-one-after-repair
+PASS P1b-both-committed
+PASS P2-legacy-torn-recovery
+PASS P2-gap-recorded
+PASS P2-completion-recovered
+PASS P2-legacy-files-removed
+PASS P2-checkpoint-written
+PASS P2b-replacement-after-recovery
+PASS P2b-new-completion-recovered
+PASS P3-baseline
+PASS P3-gap-cycle
+PASS P3-companion-delivered
+PASS P3-gap-unresolved-preserved
+PASS P3-two-posts-companion-and-completion
+PASS P3-restart-dedup-cycle
+PASS P3-no-repeat-posts
+PASS P3-gap-still-unresolved
+PASS P3b-baseline
+PASS P3b-busy-deferral-cycle
+PASS P3b-zero-posts-while-busy
+PASS P3b-companion-pending
+PASS P3b-delivery-after-idle
+PASS P3b-two-posts-after-idle
+PASS P3b-gap-unresolved
 
-RESULTS: pass=211 fail=0 (round-5 battery v6; live wake-up evidence documented separately)
+RESULTS: pass=245 fail=0 (round-6 battery v7; live wake-up evidence documented separately)
