@@ -160,24 +160,35 @@ checkpoint_write() { # checkpoint_write CURSOR INODE SIZE — ONE atomic write (
 }
 checkpoint_read() { jq -r "$1" "$CHECKPOINT" 2>/dev/null || echo ""; }
 
-# P3: persist the gap record AND its companion notification event in ONE atomic
-# store write — the companion (kind log-gap, pending) is what the wake loop
-# delivers; the gap record itself stays unresolved until manual reconciliation.
-persist_log_gap() { # persist_log_gap PRIOR_CURSOR PRIOR_SIZE OLD_INO NEW_INO
-  local key from to oi ni coord_sid tmp
-  from="$1"; to="$2"; oi="$3"; ni="$4"
-  key="log-gap:$oi:$ni:$(date -u +%FT%TZ)"
-  if event_exists "$key"; then return 0; fi
+# P3 + G1: persist the gap record AND its companion notification event in ONE
+# atomic store write. The gap identity is DETERMINISTIC — derived from the
+# transition itself (the full old-checkpoint identity + the new file's inode and
+# size), never from the time — so reprocessing the same transition after a crash
+# (the gap committed, the checkpoint update lost) reuses the existing records:
+# no duplicate gap, no duplicate companion, no reset of a delivered notification.
+persist_log_gap() { # persist_log_gap OLD_IDENTITY_COMPACT NEW_INODE NEW_SIZE
+  local old_id="$1" ni="$2" ns="$3"
+  local tid key from to oi coord_sid tmp
+  tid="$(printf '%s|%s|%s' "$old_id" "$ni" "$ns" | sha256sum | awk '{print $1}' | cut -c1-16)"
+  key="log-gap:$tid"
+  if event_exists "$key"; then
+    log "LOG-GAP already recorded for this transition (deterministic identity $tid) — no duplicate"
+    return 0
+  fi
+  from="$(printf '%s' "$old_id" | jq -r '.cursor // 0' 2>/dev/null || echo 0)"
+  to="$(printf '%s' "$old_id" | jq -r '.size // 0' 2>/dev/null || echo 0)"
+  oi="$(printf '%s' "$old_id" | jq -r '.inode // "legacy"' 2>/dev/null || echo legacy)"
   coord_sid="$(bash "$ORCH" resolve "$AGENT_D_NAME" 2>/dev/null || echo 00000000-0000-0000-0000-000000000000)"
   tmp="$EVENTS.tmp.$$.$RANDOM"
   if ! jq --arg gk "$key" \
       --arg from "$from" --arg to "$to" --arg oi "$oi" --arg ni "$ni" --arg ts "$(date -u +%FT%TZ)" \
-      --arg csid "$coord_sid" --arg cseat "$AGENT_D_NAME" \
+      --arg csid "$coord_sid" --arg cseat "$AGENT_D_NAME" --arg tid "$tid" \
       '
       .events[$gk] = {
         kind: "log-gap", seat: "D", sessionId: "coordinator",
         promptId: "00000000-0000-0000-0000-000000000000",
         outcome: "log-generation-change", observedAt: $ts, state: "unresolved",
+        transitionId: $tid,
         unobservedFrom: $from, unobservedTo: $to, oldInode: $oi, newInode: $ni,
         note: "a log generation change was detected; the interval [unobservedFrom, unobservedTo) of the previous generation was never observed. RECONCILIATION: compare each watched session turn-index (promptIds + timestamps) against the recorded events — a completion promptId present in a turn-index but absent from the event store within this window was unobserved; corroborate with GitHub branch/CI state. Never treat this interval as observed."
       }
@@ -200,13 +211,22 @@ persist_log_gap() { # persist_log_gap PRIOR_CURSOR PRIOR_SIZE OLD_INO NEW_INO
   log "LOG-GAP RECORDED (unresolved, visible, never auto-resolved) + companion notification queued: $key unobserved=[$from,$to) oldInode=$oi newInode=$ni"
 }
 
+# build the compact old-checkpoint identity for the deterministic gap key (G1)
+checkpoint_identity() { # checkpoint_identity CURSOR INODE SIZE DIGEST
+  printf '{"cursor":"%s","inode":"%s","size":"%s","digest":"%s"}' "$1" "$2" "$3" "$4" | jq -c .
+}
+
 scan_log_events() { # scan_log_events <dryrun:0|1>
   local dryrun="$1" off cur region_len last_byte chunk last_part complete_region advance proc_rc
   local ino prior_cursor prior_size prior_digest cur_digest legacy_off legacy_cont
-  # P2: the cursor, inode, size, and prefix digest persist as ONE atomic
-  # checkpoint. Legacy split state (log-offset / log-continuity) is recovered
-  # CONSERVATIVELY: a continuity gap is recorded and the scan restarts from 0 —
-  # continuity validation is never silently bypassed.
+  # P2 + G2: the cursor, inode, size, and prefix digest persist as ONE atomic
+  # checkpoint. Legacy split state (log-offset / log-continuity) is migrated
+  # RESTART-SAFELY: the gap is persisted and the new checkpoint established at
+  # the conservative recovery position (cursor 0) BEFORE the legacy files are
+  # removed — a crash or write failure at any point leaves the legacy state (or
+  # the durable new checkpoint) intact, and the recovery reruns; a failed
+  # migration NEVER fresh-baselines at EOF. Stale legacy files beside a durable
+  # checkpoint (the crash-after-checkpoint window) are cleaned up safely.
   if [ ! -f "$CHECKPOINT" ]; then
     if [ -f "$STATE_DIR/log-offset" ]; then
       legacy_off="$(cat "$STATE_DIR/log-offset" 2>/dev/null | tr -d ' ')"
@@ -216,10 +236,15 @@ scan_log_events() { # scan_log_events <dryrun:0|1>
       if [ -n "$legacy_off" ] && [ "$legacy_off" -gt 0 ] 2>/dev/null; then
         cur="$(wc -c < "$DAEMON_LOG" 2>/dev/null | tr -d ' ')"
         ino="$(stat -c %i "$DAEMON_LOG" 2>/dev/null || echo 0)"
-        persist_log_gap "$legacy_off" "${legacy_cont:-$legacy_off}" "legacy" "$ino" || return 1
+        # G1: the deterministic legacy identity — the same interrupted migration
+        # redetected after a crash reuses the existing gap (no duplicate)
+        persist_log_gap "$(checkpoint_identity "$legacy_off" "legacy" "${legacy_cont:-$legacy_off}" "legacy")" "$ino" "$cur" || return 1
       fi
-      rm -f "$STATE_DIR/log-offset" "$STATE_DIR/log-continuity.json"
+      # G2: establish the durable recovery position BEFORE removing the legacy
+      # state — if this write fails, the legacy files remain and the recovery
+      # reruns on the next cycle (never a fresh baseline)
       checkpoint_write 0 0 0 || return 1
+      rm -f "$STATE_DIR/log-offset" "$STATE_DIR/log-continuity.json"
       off=0
     else
       # a fresh start: the baseline
@@ -231,6 +256,12 @@ scan_log_events() { # scan_log_events <dryrun:0|1>
     fi
   else
     off="$(checkpoint_read '.cursor // 0')"
+    # G2: the checkpoint is authoritative and durable — stale legacy files (the
+    # crash-after-checkpoint-before-removal window) are cleaned up safely
+    if [ -f "$STATE_DIR/log-offset" ]; then
+      rm -f "$STATE_DIR/log-offset" "$STATE_DIR/log-continuity.json"
+      log "stale legacy checkpoint files removed (the atomic checkpoint is authoritative)"
+    fi
   fi
   cur="$(wc -c < "$DAEMON_LOG" 2>/dev/null | tr -d ' ')"
   ino="$(stat -c %i "$DAEMON_LOG" 2>/dev/null || echo 0)"
@@ -242,7 +273,7 @@ scan_log_events() { # scan_log_events <dryrun:0|1>
   # content-continuous copy-rotation — no gap, the cursor stands.
   if [ "$cur" -lt "$off" ]; then
     log "log shrank (rotation or truncation; old cursor $off > new size $cur) — a generation change (rescan from the start; event-ID dedup applies)"
-    persist_log_gap "$off" "$(checkpoint_read '.size // 0')" "$(checkpoint_read '.inode // 0')" "$ino" || return 1
+    persist_log_gap "$(checkpoint_identity "$off" "$(checkpoint_read '.inode // 0')" "$(checkpoint_read '.size // 0')" "$(checkpoint_read '.prefixDigest // ""')")" "$ino" "$cur" || return 1
     off=0
   else
     prior_digest="$(checkpoint_read '.prefixDigest // ""')"
@@ -251,7 +282,7 @@ scan_log_events() { # scan_log_events <dryrun:0|1>
       if [ "$cur_digest" != "$prior_digest" ]; then
         prior_size="$(checkpoint_read '.size // 0')"
         log "log generation CHANGE detected (prefix digest mismatch at cursor $off) — recording the log gap and rescanning from the start"
-        persist_log_gap "$off" "$prior_size" "$(checkpoint_read '.inode // 0')" "$ino" || return 1
+        persist_log_gap "$(checkpoint_identity "$off" "$(checkpoint_read '.inode // 0')" "$prior_size" "$prior_digest")" "$ino" "$cur" || return 1
         off=0
       elif [ "$(checkpoint_read '.inode // 0')" != "$ino" ]; then
         log "log file replaced with identical content at the cursor (inode change, digest continuous) — no gap; the cursor stands"

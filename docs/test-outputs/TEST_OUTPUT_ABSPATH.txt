@@ -244,5 +244,31 @@ PASS P3b-companion-pending
 PASS P3b-delivery-after-idle
 PASS P3b-two-posts-after-idle
 PASS P3b-gap-unresolved
+PASS G1-baseline
+PASS G1-gap-cycle
+PASS G1-one-gap
+PASS G1-posts-after-gap
+PASS G1-crash-recovery-cycle
+PASS G1-still-one-gap
+PASS G1-still-one-companion
+PASS G1-no-duplicate-post
+PASS G1-distinct-transition-cycle
+PASS G1-two-gaps-for-distinct-transitions
+PASS G1b-ambiguous-companion-cycle
+PASS G1b-companion-ambiguous-not-retried
+PASS G1b-zero-posts
+PASS G1b-gap-still-unresolved
+PASS G2-interrupted-migration-recovery
+PASS G2-one-gap-only
+PASS G2-completion-recovered
+PASS G2-legacy-removed
+PASS G2-checkpoint-established
+PASS G2-post-migration-cycle
+PASS G2-still-one-gap
+PASS G2-still-one-completion
+PASS G2b-crash-after-checkpoint-cycle
+PASS G2b-legacy-cleaned
+PASS G2b-completion-recovered-once
+PASS G2b-no-spurious-gap
 
-RESULTS: pass=245 fail=0 (round-6 battery v7; live wake-up evidence documented separately)
+RESULTS: pass=271 fail=0 (round-7 battery v8; live wake-up evidence documented separately)

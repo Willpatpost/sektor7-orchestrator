@@ -854,6 +854,75 @@ expect_ok "P3b-delivery-after-idle" bash "$SUP" run --once
 check  "P3b-two-posts-after-idle" "[ \"\$(count_posts)\" = 2 ]"
 check  "P3b-gap-unresolved" "jq -e '[.events[] | select(.kind == \"log-gap\" and .state == \"unresolved\")] | length == 1' \"$WORK/state41/events.json\" >/dev/null"
 
+
+# --- round-7 regressions (G) ----------------------------------------------------------
+# G1: the deterministic gap identity — a crash between the gap persistence and
+# the checkpoint update (simulated by restoring the pre-gap checkpoint) must
+# redetect the SAME transition without duplicating the gap, the companion, or the POST
+export SEKTOR7_STATE_DIR="$WORK/state42"; mkdir -p "$WORK/state42"
+cp "$WORK/state/seats.json" "$WORK/state42/seats.json"
+printf 'g1 gen1: 2026-11-11T20:00:00.000Z [INFO] [DAEMON] sessionId=%s promptId=77aa77aa-2222-2222-2222-222222222222 prompt turn completed\n' "$SID" > "$WORK/daemon-mock.log"
+scenario "{\"sessions\":{\"$SID\":{\"state\":\"idle\",\"permWait\":false},\"$SID_D\":{\"state\":\"idle\"}},\"postPrompt\":{\"ok\":true}}"
+expect_ok "G1-baseline" bash "$SUP" run --once --dry-run
+PREV_CHECKPOINT="$(cat "$WORK/state42/log-checkpoint.json")"
+printf 'g1 gen2: 2026-11-11T20:01:00.000Z [INFO] [DAEMON] sessionId=%s promptId=88bb88bb-3333-3333-3333-333333333333 prompt turn completed\n' "$SID" > "$WORK/daemon-mock.log"
+reset_posts
+expect_ok "G1-gap-cycle" bash "$SUP" run --once
+check  "G1-one-gap" "jq -e '[.events[] | select(.kind == \"log-gap\" and .state == \"unresolved\")] | length == 1' \"$WORK/state42/events.json\" >/dev/null"
+check  "G1-posts-after-gap" "[ \"\$(count_posts)\" = 2 ]"
+printf '%s' "$PREV_CHECKPOINT" > "$WORK/state42/log-checkpoint.json"
+expect_ok "G1-crash-recovery-cycle" bash "$SUP" run --once
+check  "G1-still-one-gap" "jq -e '[.events[] | select(.kind == \"log-gap\" and .state == \"unresolved\")] | length == 1' \"$WORK/state42/events.json\" >/dev/null"
+check  "G1-still-one-companion" "jq -e '[.events[] | select(.kind == \"log-gap\" and .state == \"delivered\")] | length == 1' \"$WORK/state42/events.json\" >/dev/null"
+check  "G1-no-duplicate-post" "[ \"\$(count_posts)\" = 2 ]"
+printf 'g1 gen3: 2026-11-11T20:02:00.000Z [INFO] [DAEMON] sessionId=%s promptId=99cc99cc-4444-4444-4444-444444444444 prompt turn completed\n' "$SID" > "$WORK/daemon-mock.log"
+expect_ok "G1-distinct-transition-cycle" bash "$SUP" run --once
+check  "G1-two-gaps-for-distinct-transitions" "jq -e '[.events[] | select(.kind == \"log-gap\" and .state == \"unresolved\")] | length == 2' \"$WORK/state42/events.json\" >/dev/null"
+
+# G1b: an ambiguous log-gap companion is never blindly retried
+export SEKTOR7_STATE_DIR="$WORK/state43"; mkdir -p "$WORK/state43"
+cp "$WORK/state/seats.json" "$WORK/state43/seats.json"
+GKEY="log-gap:abcdef0123456789"
+NKEY="log-gap-notify:log-gap:abcdef0123456789"
+jq -n --arg gk "$GKEY" --arg nk "$NKEY" --arg ts "$(date -u +%FT%TZ)" --arg csid "$SID_D" --arg cseat coder-a3 \
+  '{events: {($gk): {kind: "log-gap", seat: "D", sessionId: "coordinator", promptId: "00000000-0000-0000-0000-000000000000", outcome: "log-generation-change", observedAt: $ts, state: "unresolved", transitionId: "abcdef0123456789"}, ($nk): {kind: "log-gap", seat: $cseat, sessionId: $csid, promptId: "00000000-0000-0000-0000-000000000000", outcome: "log-generation-change", observedAt: $ts, state: "submitting", attempts: 1, firstSeen: $ts, gapKey: $gk}}, permState: {}}' > "$WORK/state43/events.json"
+reset_posts
+scenario "{\"sessions\":{\"$SID\":{\"state\":\"idle\",\"permWait\":false},\"$SID_D\":{\"state\":\"idle\"}},\"postPrompt\":{\"ok\":true}}"
+printf 'g1b log content\n' > "$WORK/daemon-mock.log"
+printf '{ "cursor": "0", "inode": "1", "size": "0", "prefixDigest": "(empty)" }' > "$WORK/state43/log-checkpoint.json"
+expect_ok "G1b-ambiguous-companion-cycle" bash "$SUP" run --once
+check  "G1b-companion-ambiguous-not-retried" "jq -e '.events[\"$NKEY\"].state == \"ambiguous\"' \"$WORK/state43/events.json\" >/dev/null"
+check  "G1b-zero-posts" "[ \"\$(count_posts)\" = 0 ]"
+check  "G1b-gap-still-unresolved" "jq -e '.events[\"$GKEY\"].state == \"unresolved\"' \"$WORK/state43/events.json\" >/dev/null"
+
+# G2: the restart-safe legacy migration — the interrupted state (the legacy files
+# intact, no checkpoint) recovers with the deterministic identity: no duplicate gap,
+# the completions recovered once, the legacy files then removed
+export SEKTOR7_STATE_DIR="$WORK/state44"; mkdir -p "$WORK/state44"
+cp "$WORK/state/seats.json" "$WORK/state44/seats.json"
+printf 'g2 content: 2026-11-11T20:10:00.000Z [INFO] [DAEMON] sessionId=%s promptId=aabbaabb-5555-5555-5555-555555555555 prompt turn completed\n' "$SID" > "$WORK/daemon-mock.log"
+echo 30 > "$WORK/state44/log-offset"
+expect_ok "G2-interrupted-migration-recovery" bash "$SUP" run --once --dry-run
+check  "G2-one-gap-only" "jq -e '[.events[] | select(.kind == \"log-gap\" and .state == \"unresolved\")] | length == 1' \"$WORK/state44/events.json\" >/dev/null"
+check  "G2-completion-recovered" "jq -e '[.events[] | select(.promptId == \"aabbaabb-5555-5555-5555-555555555555\")] | length == 1' \"$WORK/state44/events.json\" >/dev/null"
+check  "G2-legacy-removed" "[ ! -f \"$WORK/state44/log-offset\" ]"
+check  "G2-checkpoint-established" "[ -f \"$WORK/state44/log-checkpoint.json\" ]"
+expect_ok "G2-post-migration-cycle" bash "$SUP" run --once --dry-run
+check  "G2-still-one-gap" "jq -e '[.events[] | select(.kind == \"log-gap\" and .state == \"unresolved\")] | length == 1' \"$WORK/state44/events.json\" >/dev/null"
+check  "G2-still-one-completion" "jq -e '[.events[] | select(.promptId == \"aabbaabb-5555-5555-5555-555555555555\")] | length == 1' \"$WORK/state44/events.json\" >/dev/null"
+
+# G2b: the crash AFTER the checkpoint but BEFORE the legacy removal — the
+# checkpoint is authoritative, the stale legacy files cleaned, no fresh baseline
+export SEKTOR7_STATE_DIR="$WORK/state45"; mkdir -p "$WORK/state45"
+cp "$WORK/state/seats.json" "$WORK/state45/seats.json"
+printf 'g2b content: 2026-11-11T20:15:00.000Z [INFO] [DAEMON] sessionId=%s promptId=ccddccdd-6666-6666-6666-666666666666 prompt turn completed\n' "$SID" > "$WORK/daemon-mock.log"
+printf '{ "cursor": "0", "inode": "999", "size": "0", "prefixDigest": "(empty)" }' > "$WORK/state45/log-checkpoint.json"
+echo 999 > "$WORK/state45/log-offset"
+expect_ok "G2b-crash-after-checkpoint-cycle" bash "$SUP" run --once --dry-run
+check  "G2b-legacy-cleaned" "[ ! -f \"$WORK/state45/log-offset\" ]"
+check  "G2b-completion-recovered-once" "jq -e '[.events[] | select(.promptId == \"ccddccdd-6666-6666-6666-666666666666\")] | length == 1' \"$WORK/state45/events.json\" >/dev/null"
+check  "G2b-no-spurious-gap" "jq -e '[.events[] | select(.kind == \"log-gap\")] | length == 0' \"$WORK/state45/events.json\" >/dev/null"
+
 echo
-echo "RESULTS: pass=$PASS fail=$FAIL (round-6 battery v7; live wake-up evidence documented separately)"
+echo "RESULTS: pass=$PASS fail=$FAIL (round-7 battery v8; live wake-up evidence documented separately)"
 [ "$FAIL" -eq 0 ]
