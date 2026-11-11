@@ -1,0 +1,63 @@
+SEKTOR7 pilot expiry-fuse verification — final run 2026-11-11T22:25:41Z
+test: fuse-test.sh — the REAL v11 supervisor.sh (mock-wired, test state dirs only; production untouched, sources verified byte-identical to 02fd483 after the run)
+
+--- result: 15 pass / 0 fail ---
+PASS: A1-supervisor-started
+PASS: A2-baseline-written
+supervisor running as pid 3304887
+PASS: A3-fuse-evidence-exists
+PASS: A4-exit-verified
+PASS: A5-method-stop-flag
+PASS: A6-supervisor-gone
+PASS: A7-fuse-gone
+PASS: A8-clean-exit-log
+PASS: A9-fuse-deadline-log
+PASS: A10-fuse-terminated-log
+PASS: A11-no-residual-stopflag
+PASS: A12-state-preserved
+PASS: B1-already-stopped-method
+PASS: B2-stale-flag-removed
+PASS: B3-evidence
+----------------------------------------
+FUSE TEST: 15 pass, 0 fail (workdir /tmp/fuse-test.nMrWPD)
+evidence: /tmp/fuse-test.nMrWPD/pilot/evidence-A.json (live-stop), /tmp/fuse-test.nMrWPD/pilot/evidence-B.json (already-stopped)
+
+--- evidence A (live supervisor stopped at deadline) ---
+{
+  "deadline": 1794435915,
+  "executedAt": "2026-11-11T22:25:27Z",
+  "method": "stop-flag",
+  "supervisorRunningAtDeadline": true,
+  "exitVerified": true
+}
+--- fuse log A ---
+2026-11-11T22:25:07Z fuse armed: deadline_epoch=1794435915 (2026-11-11T22:25:15Z) supervisor_pid=3304887 state_dir=/tmp/fuse-test.nMrWPD/state
+2026-11-11T22:25:15Z DEADLINE REACHED — executing the hard stop
+stop-flag set (a running supervisor exits within one cycle)
+2026-11-11T22:25:15Z stop-flag set — waiting up to 60 s for the clean exit (one cycle at the 20 s interval)
+2026-11-11T22:25:27Z supervisor terminated (method=stop-flag)
+2026-11-11T22:25:27Z evidence written: /tmp/fuse-test.nMrWPD/pilot/expiry-executed.json (exitVerified=true)
+--- supervisor log A ---
+2026-11-11T22:25:06Z supervisor starting: mode=live dry=0 interval=20s
+2026-11-11T22:25:06Z seats configuration validated (coordinator=coder-a3)
+2026-11-11T22:25:06Z log baseline set (no replay; the initial continuity snapshot recorded)
+2026-11-11T22:25:26Z stop-flag observed — exiting cleanly
+
+--- evidence B (already-stopped branch, stale flag removed) ---
+{
+  "deadline": 1794435933,
+  "executedAt": "2026-11-11T22:25:33Z",
+  "method": "already-stopped",
+  "supervisorRunningAtDeadline": false,
+  "exitVerified": true
+}
+--- fuse log B ---
+2026-11-11T22:25:30Z fuse armed: deadline_epoch=1794435933 (2026-11-11T22:25:33Z) supervisor_pid=unset state_dir=/tmp/fuse-test.nMrWPD/state
+2026-11-11T22:25:33Z DEADLINE REACHED — executing the hard stop
+2026-11-11T22:25:33Z supervisor not running at deadline — stale stop-flag removed (if any); nothing to stop
+2026-11-11T22:25:33Z evidence written: /tmp/fuse-test.nMrWPD/pilot/expiry-executed.json (already-stopped)
+
+--- test-development notes (honest record) ---
+run 1 (5/15) and run 2 (13/15) exposed two defects, both fixed:
+  (a) the deadline poll was a fixed 300s sleep — the first time-check happened only after it, overshooting short deadlines; now SEKTOR7_FUSE_POLL (default 300s production; the stop executes within one poll of the deadline)
+  (b) the jq -n evidence writers used object shorthand ({deadline} = input field, null under -n) instead of named-arg refs; fixed to explicit $refs — the run-2 nulls are visible in the earlier capture
