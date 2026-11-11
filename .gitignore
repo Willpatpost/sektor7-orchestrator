@@ -1,0 +1,14 @@
+# runtime state — never commit
+state/
+*.log
+postcount
+posted-*
+lastprompt
+scenario.json
+*.tmp.*
+*.tmp
+# credentials — never commit
+.qwen-serve-token
+*token*
+# OS noise
+.DS_Store
