@@ -1,0 +1,11 @@
+{
+  "approvals": {
+    "062c76d021721e6a291357c8ba45a6db7886a5549996cac65ba854bab72654b3": {
+      "checkpoint": "V2X-CP3-B-R1a1-F8",
+      "seat": "B",
+      "provenanceFile": "OWNER_DIRECTIVE_2026-11-11_CYCLE2_CLOSURE_F8_RELAY.md",
+      "approvedAt": "2026-11-11T16:35:00Z",
+      "note": "retroactive registration: the F8 relay (promptId 07ef6f70-427e-4cc2-a0af-7529f2eef4b1, delivered 2026-11-11T17:47Z) was owner-authorized by the cycle-2 directive; the directive text carries its CHECKPOINT declaration in state/f8-approved-directive.txt"
+    }
+  }
+}

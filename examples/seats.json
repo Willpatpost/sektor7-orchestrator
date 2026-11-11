@@ -1,0 +1,9 @@
+{
+  "watch": ["coder-a8", "coder-e9", "coder-32"],
+  "seatOf": {
+    "coder-a8": "B",
+    "coder-e9": "C",
+    "coder-32": "A"
+  },
+  "note": "watched seat session names with their seat bindings (F3: relay target/seat matching); Agent D (coder-a3) is the wake target only, never a wake source; sessionIds are resolved live every cycle and never cached as authority. Seat bindings were established 2026-11-11 via the identity protocol (reply/turn-detail evidence + worktree cross-checks), not by elimination or timing."
+}

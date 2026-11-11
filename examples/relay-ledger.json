@@ -1,0 +1,11 @@
+{
+  "relays": {
+    "062c76d021721e6a291357c8ba45a6db7886a5549996cac65ba854bab72654b3": {
+      "sessionId": "88b93591-309e-4503-8ffe-9a7afd8314b1",
+      "status": "delivered",
+      "promptId": "07ef6f70-427e-4cc2-a0af-7529f2eef4b1",
+      "recordedAt": "2026-11-11T17:47:43Z",
+      "note": "retroactive registration: F8 relayed 2026-11-11T17:47Z via the v1 prompt path under the cycle-2 F8 relay authorization; directive identity = sha256 of the BEGIN/END approved text"
+    }
+  }
+}

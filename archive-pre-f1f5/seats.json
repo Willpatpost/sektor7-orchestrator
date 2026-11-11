@@ -1,0 +1,4 @@
+{
+  "watch": ["coder-a8", "coder-e9", "coder-32"],
+  "note": "watched seat session names; Agent D (coder-a3) is the wake target only, never a wake source; sessionIds are resolved live every cycle and never cached as authority"
+}

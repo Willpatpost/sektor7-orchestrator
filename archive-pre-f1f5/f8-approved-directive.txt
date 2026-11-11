@@ -1,0 +1,77 @@
+**BEGIN APPROVED F8 DIRECTIVE**
+
+# SEKTOR7 — B-R1a1 INDEPENDENT REVIEW
+## F8 — Foreign-Keyed, Same-MK Shard Evidence
+
+**VERDICT: HOLD**
+
+**AUTHORIZATION: GO — F8 CORRECTIVE ONLY**
+
+Reviewed commit:
+
+`6c61da5d7729662552098d5886af41e5706c0496`
+
+Accepted corrective ancestry preserved:
+
+`827975dd` → `73384b5c` → `6c61da5d`
+
+CI `42956488872` is GREEN ×3.
+
+All 34 classifier tests pass on Ubuntu, Windows, and macOS ARM64.
+
+F7 is accepted. The F6 manifest-key correction is accepted.
+
+One remaining F6 defect must be fixed.
+
+### F8 finding
+
+In `classify_witness_evidence`, shard-family records carrying a foreign-MK-formatted deterministic key are ignored when their key does not match the covering-MK prefix.
+
+However, a strictly decoded shard payload under such a key can bind the covering MK.
+
+That is contradictory same-checkpoint evidence and must not disappear.
+
+### Required correction
+
+For recognized `AncestryWitnessShard` records that do not match the covering-MK key form:
+
+1. Inspect the shard payload through the read-only interface using bounded reads.
+2. Where the strictly decoded shard's `mk` equals the covering MK, refuse with typed `ShardKeyNoncanonical` degradation.
+3. Where the decoded payload binds another MK, preserve the legitimate foreign-evidence exclusion.
+4. Preserve canonical shard acceptance, exact byte comparison, F1 census, and F3 publication-order checks.
+5. Do not infer covering-MK membership from an undecodable foreign-keyed payload.
+6. Preserve the accepted per-shard payload ceiling and avoid retaining multiple shard payloads unnecessarily.
+7. Do not descend below the covering MK or add provider authority.
+
+Add adversarial regressions proving:
+
+- A foreign-MK key carrying a valid covering-MK shard payload degrades without a manifest.
+- The same contradictory record alongside an otherwise complete canonical witness prevents `CoherentlyObserved`.
+- Genuine foreign-keyed, foreign-MK shard evidence remains foreign.
+- Existing canonical single-shard and multi-shard observations remain successful.
+
+### Strict scope
+
+Modify ONLY:
+
+`engine/crates/engine-persist/src/recovery_classification.rs`
+
+Preserve all 34 existing classifier regressions and the accepted discovery and production modules.
+
+Do not change `recovery_discovery.rs`, `ancestry_witness.rs`, the CI workflow, or other agents' work.
+
+Make one narrow corrective commit on:
+
+`s6-c4-cp3-b-r1a1-recovery-classification`
+
+Parent must be the current reviewed F6/F7 commit.
+
+Run formatting, Clippy, regression batteries, B-P1 checks, and full three-platform CI.
+
+Report the final SHA, diff, new tests, and exact CI results.
+
+**STOP FOR INDEPENDENT REVIEW.**
+
+No B-R1b, crossing, startup integration, destructive operations, or main merge authorized.
+
+**END APPROVED F8 DIRECTIVE**
