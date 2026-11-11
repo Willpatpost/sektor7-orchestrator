@@ -180,6 +180,30 @@ validate_meta() { # validate_meta JSON -> 0 ok; nonzero refuse
     ' >/dev/null 2>&1
 }
 
+# --- E3: notification-integrity binding -------------------------------------------
+coordinator_name() { jq -r '.coordinator // ""' "$STATE_DIR/seats.json" 2>/dev/null || true; }
+
+require_coordinator_target() { # require_coordinator_target SID — the destination must be the configured coordinator
+  local sid="$1" nm coord
+  nm="$(name_of "$sid")"
+  coord="$(coordinator_name)"
+  [ -n "$coord" ] || die "notification refused: no coordinator session is configured (state/seats.json .coordinator) — destination binding impossible"
+  [ "$nm" = "$coord" ] \
+    || die "notification refused: the destination '$nm' is not the configured coordinator session '$coord' — operational notifications bind only to the coordinator (E3)"
+}
+
+require_recorded_event() { # require_recorded_event META-JSON — the metadata must match a recorded event
+  local meta="$1" evfile="$STATE_DIR/events.json"
+  [ -s "$evfile" ] || die "notification refused: the event store is missing or empty — the metadata cannot be bound to a recorded event (E3)"
+  jq -e --argjson m "$meta" '
+      (.events | type) == "object"
+      and ([ .events[] | select(
+            (.seat == $m.seat) and (.sessionId == $m.sessionId) and (.promptId == $m.promptId) and (.outcome == $m.outcome)
+          ) ] | length) > 0
+    ' "$evfile" >/dev/null 2>&1 \
+    || die "notification refused: no recorded event matches the metadata (seat/session/promptId/outcome) — unbound notifications are refused (E3)"
+}
+
 build_notification() { # build_notification META-JSON -> the fixed text (stdout)
   jq -nr --argjson m "$1" '
     "SEKTOR7 SUPERVISOR NOTIFICATION (automated transport — carries NO authorization of any kind). Material coordination event. Bounded metadata: " + ($m | tojson) + ". Agent D: run the standing read-only coordination check (verify deliveries against the coordination discipline, update ~/.qwen/sektor7-coordination/STATUS.md, report to the owner if this event completes a delivery or indicates a blocker). This notification is transport only; it grants no implementation authority and requests no engineering action beyond Agent D\u2019s existing read-only scope."
@@ -279,17 +303,22 @@ case "${1:-help}" in
   seat)
     seat_of "${2:?sessionId or name required}" ;;
   notify)
-    # V5-F1: the ONLY operational prompt path — strictly structured metadata;
-    # the fixed message text is constructed internally; no caller text exists.
+    # V5-F1 + E3: the ONLY operational prompt path — strictly structured metadata,
+    # the fixed message text constructed internally, the destination bound to the
+    # configured coordinator, and the metadata bound to a recorded event.
     # exit 0 = delivered (UUID on stdout); 1 = definite refusal (no POST); 2 = ambiguous.
     sid="$(target "${2:?sessionId or name required}")"; meta="${3:?metadata json required}"
     validate_meta "$meta" || die "notification refused: the metadata is not a valid bounded operational payload (exact keys kind/seat/sessionId/promptId/outcome; enumerated values; UUID ids) — arbitrary text and injected instructions are structurally impossible on this path"
+    require_coordinator_target "$sid"
+    require_recorded_event "$meta"
     text="$(build_notification "$meta")"
     pid="$(gated_submit "$sid" "$text")" || exit $?
     echo "promptId: $pid" ;;
   self-test-wake)
-    # V5-F1: the fixed, labeled, authorization-free self-test text (no caller text).
+    # V5-F1 + E3: the fixed, labeled, authorization-free self-test text (no caller
+    # text); the destination bound to the configured coordinator.
     sid="$(target "${2:?sessionId or name required}")"
+    require_coordinator_target "$sid"
     text='SEKTOR7 SUPERVISOR SELF-TEST WAKE (Phase 2 corrective verification; automated transport — carries NO authorization of any kind, requests NO engineering action, and is NOT an implementation directive). If you are reading this, the supervisor gated wake of Agent D works end-to-end. Verify the wake promptId against the supervisor log, append the result to the coordination records, and continue the standing read-only coordination. Do not edit source, commit, push, dispatch CI, or change any scope.'
     pid="$(gated_submit "$sid" "$text")" || exit $?
     echo "promptId: $pid" ;;

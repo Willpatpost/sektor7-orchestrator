@@ -125,5 +125,42 @@ PASS V5F4-offset-held-byte-exact
 PASS V5F4-completed-cycle
 PASS V5F4-event-after-completion
 PASS V5F4-cursor-byte-exact-advanced
+PASS E1a-baseline
+PASS E1a-corrupted-store-cycle
+PASS E1a-cursor-held
+PASS E1a-no-false-persistence
+PASS E1a-scan-held-logged
+PASS E1a-repair-cycle
+PASS E1a-recovered-exactly-once
+PASS E1a-cursor-advanced-after-repair
+PASS E1b-baseline
+PASS E1b-rename-failure-cycle
+PASS E1b-cursor-held
+PASS E1b-failure-logged
+PASS E1b-repair-cycle
+PASS E1b-recovered-exactly-once
+PASS E2a-baseline
+PASS E2a-pre-replacement-cycle
+PASS E2a-pre-event-recorded
+PASS E2a-shorter-replacement-cycle
+PASS E2a-new-generation-event-not-skipped
+PASS E2a-prior-event-preserved
+PASS E2a-rotation-logged
+PASS E2b-baseline-on-first-generation
+PASS E2b-first-completion-cycle
+PASS E2b-first-generation-recorded
+PASS E2b-longer-replacement-cycle
+PASS E2b-rotation-path-logged
+PASS E2b-seen-event-not-refired
+PASS E2b-new-event-recorded
+PASS E2b-cursor-advanced-to-size
+PASS E3a-non-coordinator-destination
+PASS E3a-zero-posts
+PASS E3b-unrecorded-event
+PASS E3b-zero-posts
+PASS E3c-seat-mismatch
+PASS E3c-zero-posts
+PASS E3d-bound-notify-delivered
+PASS E3d-one-post
 
-RESULTS: pass=127 fail=0 (round-3 battery v4; live wake-up evidence documented separately)
+RESULTS: pass=164 fail=0 (round-4 battery v5; live wake-up evidence documented separately)

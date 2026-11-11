@@ -41,25 +41,46 @@ EVENT_MAX_AGE_S="${SEKTOR7_SUP_EVENT_MAX_AGE:-7200}"
 
 mkdir -p "$STATE_DIR"
 LOG="$STATE_DIR/supervisor.log"
-EVENTS="$STATE_DIR/events.json"
-[ -f "$EVENTS" ] || printf '{"events":{}}' > "$EVENTS"
-PERMSTATE="$STATE_DIR/perm-state.json"
-[ -f "$PERMSTATE" ] || printf '{"sessions":{}}' > "$PERMSTATE"
-
-UUID_RE='^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
 
 log() { echo "$(date -u +%FT%TZ) $*" >> "$LOG"; }
 
-# --- event state machine ----------------------------------------------------------
+# fault-tolerant startup init (an unwritable store must not kill the supervisor —
+# the store operations themselves fail loudly and hold the cursor per E1)
+EVENTS="$STATE_DIR/events.json"
+[ -f "$EVENTS" ] || { printf '{"events":{}}' > "$EVENTS" 2>/dev/null || log "event store unwritable at startup (fault-tolerant; store operations will fail loudly): $EVENTS"; }
+PERMSTATE="$STATE_DIR/perm-state.json"
+[ -f "$PERMSTATE" ] || { printf '{"sessions":{}}' > "$PERMSTATE" 2>/dev/null || log "perm-state unwritable at startup (fault-tolerant): $PERMSTATE"; }
+
+UUID_RE='^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+
+# --- event state machine (E1: write failures propagate explicitly) ----------------
 event_get() { jq -r --arg k "$1" '.events[$k] // empty' "$EVENTS"; }
 event_exists() { jq -e --arg k "$1" '.events[$k] != null' "$EVENTS" >/dev/null; }
-event_set() { # event_set KEY FIELDS_JSON
+event_set() { # event_set KEY FIELDS_JSON -> 0 ok; 1 = write/serialization/rename failure
   local tmp="$EVENTS.tmp.$$.$RANDOM"
-  jq --arg k "$1" --argjson f "$2" '.events[$k] = $f' "$EVENTS" > "$tmp" && mv "$tmp" "$EVENTS"
+  if ! jq --arg k "$1" --argjson f "$2" '.events[$k] = $f' "$EVENTS" > "$tmp" 2>/dev/null; then
+    rm -f "$tmp"
+    echo "ERROR: event-store serialization failed (invalid store JSON or bad fields)" >&2
+    return 1
+  fi
+  if ! mv "$tmp" "$EVENTS" 2>/dev/null; then
+    rm -f "$tmp"
+    echo "ERROR: event-store atomic rename failed" >&2
+    return 1
+  fi
 }
 event_patch() { # event_patch KEY FILTER [extra jq options before the filter]
   local tmp="$EVENTS.tmp.$$.$RANDOM"
-  jq --arg k "$1" "${@:3}" "$2" "$EVENTS" > "$tmp" && mv "$tmp" "$EVENTS"
+  if ! jq --arg k "$1" "${@:3}" "$2" "$EVENTS" > "$tmp" 2>/dev/null; then
+    rm -f "$tmp"
+    echo "ERROR: event-store serialization failed (patch)" >&2
+    return 1
+  fi
+  if ! mv "$tmp" "$EVENTS" 2>/dev/null; then
+    rm -f "$tmp"
+    echo "ERROR: event-store atomic rename failed (patch)" >&2
+    return 1
+  fi
 }
 
 # --- wake-rate limiting (UTC-correct) ----------------------------------------------
@@ -117,14 +138,20 @@ wake_agent_d() { # wake_agent_d <metadata-json>
 
 # --- log scanning (V5-F4: byte-exact; persist-before-advance) ----------------------
 scan_log_events() { # scan_log_events <dryrun:0|1>
-  local dryrun="$1" off_file="$STATE_DIR/log-offset" off cur region_len last_byte chunk last_part complete_region advance
+  local dryrun="$1" off_file="$STATE_DIR/log-offset" off cur region_len last_byte chunk last_part complete_region advance proc_rc
   [ -f "$off_file" ] || { wc -c < "$DAEMON_LOG" 2>/dev/null | tr -d ' ' > "$off_file"; log "log baseline set (no replay)"; return 0; }
   off="$(cat "$off_file")"
   cur="$(wc -c < "$DAEMON_LOG" 2>/dev/null | tr -d ' ')"
   if [ "$cur" -lt "$off" ]; then
-    echo "$cur" > "$off_file"
-    log "log truncated/rotated — baseline reset (events persist in the event store)"
-    return 0
+    # E2: the log shrank — replacement (rotation) or truncation. Reset to the START
+    # of the new generation and rescan it in full: completions already present in
+    # the replacement file are processed (not skipped); the event-ID dedup
+    # (sessionId/promptId/outcome keys) prevents re-firing events already recorded
+    # from the previous generation. Coverage of generations that existed ONLY in
+    # the removed file before this process ever scanned them is not establishable
+    # from the single watched path — documented as a residual limitation.
+    log "log shrank (rotation or truncation; old cursor $off > new size $cur) — rescanning the new generation from the start (event-ID dedup applies)"
+    off=0
   fi
   region_len=$((cur - off))
   if [ "$region_len" -le 0 ]; then return 0; fi
@@ -145,10 +172,18 @@ scan_log_events() { # scan_log_events <dryrun:0|1>
       advance=$((cur - $(printf '%s' "$last_part" | wc -c)))
     fi
   fi
+  proc_rc=0
   if [ -n "$complete_region" ]; then
     printf '%s\n' "$complete_region" | grep -E 'prompt turn (completed|failed)' | while IFS= read -r line; do
       process_log_line "$line" "$dryrun"
-    done
+    done || proc_rc=$?
+  fi
+  if [ "$proc_rc" != "0" ]; then
+    # E1: a material event failed to persist — NEVER advance past it. The cursor
+    # holds at $off and the region (including the failed event) is retried on the
+    # next cycle once the underlying store failure is resolved.
+    log "SCAN HELD: event persistence failed (rc=$proc_rc) — cursor UNCHANGED at $off; the region will be retried"
+    return 1
   fi
   echo "$advance" > "$off_file"
 }
@@ -169,8 +204,13 @@ process_log_line() { # process_log_line LINE dryrun
   [ -n "$iswatched" ] || return 0
   key="log:$sid:$promptid:$outcome"
   if event_exists "$key"; then return 0; fi
-  event_set "$key" "$(jq -n --arg seat "$iswatched" --arg sid "$sid" --arg pid "$promptid" --arg out "$outcome" --arg ts "$(date -u +%FT%TZ)" \
-    '{kind: "worker-turn", seat: $seat, sessionId: $sid, promptId: $pid, outcome: $out, observedAt: $ts, state: "pending", attempts: 0, firstSeen: $ts}')"
+  # E1: explicit persistence-failure propagation — no false "persisted" log, and the
+  # caller (scan_log_events) holds the cursor so the event is retried safely.
+  if ! event_set "$key" "$(jq -n --arg seat "$iswatched" --arg sid "$sid" --arg pid "$promptid" --arg out "$outcome" --arg ts "$(date -u +%FT%TZ)" \
+    '{kind: "worker-turn", seat: $seat, sessionId: $sid, promptId: $pid, outcome: $out, observedAt: $ts, state: "pending", attempts: 0, firstSeen: $ts}')"; then
+    log "EVENT PERSISTENCE FAILED: $key (the cursor will hold; retried next cycle)"
+    return 1
+  fi
   log "EVENT PERSISTED (pending): $key"
 }
 
@@ -319,7 +359,7 @@ case "${1:-status}" in
       fi
       if bash "$ORCH" capabilities >/dev/null 2>&1; then
         recover_and_escalate || log "recovery error (non-fatal): $?"
-        scan_log_events "$DRY" || log "scan error (non-fatal): $?"
+        scan_log_events "$DRY" || log "EVENT-STORE/SCAN FAILURE (the cursor HOLDS; the region retries): $?"
         check_permission_waits "$DRY" || log "permission-watch error (non-fatal): $?"
         deliver_pending "$DRY" || log "delivery error (non-fatal): $?"
       else
